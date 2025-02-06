@@ -248,10 +248,10 @@ func main() {
 		Name:  "circleci-queue-time",
 		Usage: "Get queue times for CircleCI jobs",
 		Flags: []cli.Flag{
-			&cli.StringFlag{
+			&cli.StringSliceFlag{
 				Name:     "project",
 				Aliases:  []string{"p"},
-				Usage:    "Project slug (e.g. gh/org/repo)",
+				Usage:    "Project slug (e.g. gh/org/repo). Can be specified multiple times",
 				Required: true,
 			},
 			&cli.StringFlag{
@@ -272,7 +272,7 @@ func main() {
 			},
 		},
 		Action: func(c *cli.Context) error {
-			projectSlug := strings.Replace(c.String("project"), "github/", "gh/", 1)
+			projects := c.StringSlice("project")
 			limit := c.Int("limit")
 
 			client := &CircleCIClient{
@@ -282,6 +282,7 @@ func main() {
 
 			// チャネルを作成
 			jobsChan := make(chan JobQueueInfo)
+			errChan := make(chan error, len(projects))
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 
@@ -326,93 +327,119 @@ func main() {
 				}
 			}()
 
-			count := 0 // パイプライン数のカウント
-			var nextPageToken string
+			// プロジェクトごとの処理用WaitGroup
+			var projectWg sync.WaitGroup
+			projectWg.Add(len(projects))
 
-			// パイプラインの取得とジョブ情報の収集
-			for {
-				pipelines, err := client.GetPipelines(projectSlug, nextPageToken)
-				if err != nil {
-					close(jobsChan)
-					return err
-				}
+			// 各プロジェクトを並列処理
+			for _, projectSlug := range projects {
+				go func(slug string) {
+					defer projectWg.Done()
+					slug = strings.Replace(slug, "github/", "gh/", 1)
 
-				for _, pipeline := range pipelines.Items {
-					if count >= limit {
-						break
-					}
+					count := 0
+					var nextPageToken string
 
-					workflows, err := client.GetPipelineWorkflows(pipeline.ID)
-					if err != nil {
-						fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
-						continue
-					}
-
-					hasProcessedPipeline := false
-
-					for _, workflow := range workflows.Items {
-						jobs, err := client.GetWorkflowJobs(workflow.ID)
+					// パイプラインの取得とジョブ情報の収集
+					for {
+						pipelines, err := client.GetPipelines(slug, nextPageToken)
 						if err != nil {
-							fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
-							continue
+							errChan <- fmt.Errorf("error fetching pipelines for %s: %v", slug, err)
+							return
 						}
 
-						for _, job := range jobs.Items {
-							jobDetails, err := client.GetJobDetails(projectSlug, job.JobNumber)
+						for _, pipeline := range pipelines.Items {
+							if count >= limit {
+								break
+							}
+
+							workflows, err := client.GetPipelineWorkflows(pipeline.ID)
 							if err != nil {
-								fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
+								fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
 								continue
 							}
 
-							queuedAt, err := time.Parse(time.RFC3339, jobDetails.QueuedAt)
-							if err != nil {
-								continue
+							hasProcessedPipeline := false
+
+							for _, workflow := range workflows.Items {
+								jobs, err := client.GetWorkflowJobs(workflow.ID)
+								if err != nil {
+									fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
+									continue
+								}
+
+								for _, job := range jobs.Items {
+									jobDetails, err := client.GetJobDetails(slug, job.JobNumber)
+									if err != nil {
+										fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
+										continue
+									}
+
+									queuedAt, err := time.Parse(time.RFC3339, jobDetails.QueuedAt)
+									if err != nil {
+										continue
+									}
+
+									startedAt, err := time.Parse(time.RFC3339, jobDetails.StartedAt)
+									if err != nil {
+										continue
+									}
+
+									info := JobQueueInfo{
+										Repository:   jobDetails.Project.Slug,
+										JobName:      jobDetails.Name,
+										JobNumber:    jobDetails.Number,
+										QueuedAt:     queuedAt,
+										StartedAt:    startedAt,
+										QueueTime:    startedAt.Sub(queuedAt),
+										WorkflowName: workflow.Name,
+										WorkflowID:   workflow.ID,
+										PipelineID:   pipeline.ID,
+									}
+
+									select {
+									case <-ctx.Done():
+										return
+									case jobsChan <- info:
+										hasProcessedPipeline = true
+									}
+								}
 							}
 
-							startedAt, err := time.Parse(time.RFC3339, jobDetails.StartedAt)
-							if err != nil {
-								continue
-							}
-
-							info := JobQueueInfo{
-								Repository:   jobDetails.Project.Slug,
-								JobName:      jobDetails.Name,
-								JobNumber:    jobDetails.Number,
-								QueuedAt:     queuedAt,
-								StartedAt:    startedAt,
-								QueueTime:    startedAt.Sub(queuedAt),
-								WorkflowName: workflow.Name,
-								WorkflowID:   workflow.ID,
-								PipelineID:   pipeline.ID,
-							}
-
-							select {
-							case <-ctx.Done():
-								close(jobsChan)
-								return nil
-							case jobsChan <- info:
-								hasProcessedPipeline = true
+							if hasProcessedPipeline {
+								count++
 							}
 						}
+
+						if count >= limit {
+							break
+						}
+
+						nextPageToken = pipelines.NextPageToken
+						if nextPageToken == "" {
+							break
+						}
 					}
-
-					if hasProcessedPipeline {
-						count++
-					}
-				}
-
-				if count >= limit {
-					break
-				}
-
-				nextPageToken = pipelines.NextPageToken
-				if nextPageToken == "" {
-					break
-				}
+				}(projectSlug)
 			}
 
+			// すべてのプロジェクトの処理完了を待つ
+			projectWg.Wait()
 			close(jobsChan)
+
+			// エラーチェック
+			close(errChan)
+			var errors []error
+			for err := range errChan {
+				errors = append(errors, err)
+			}
+
 			wg.Wait()
+
+			if len(errors) > 0 {
+				return fmt.Errorf("encountered errors: %v", errors)
+			}
+
 			return nil
 		},
 	}
