@@ -222,27 +222,6 @@ func (c *CircleCIClient) GetPipelineWorkflows(pipelineID string) (*PipelineWorkf
 	return &workflows, nil
 }
 
-func printTable(jobs []JobQueueInfo) {
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
-	fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t------\t---------\t----------\t----------")
-
-	for _, job := range jobs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
-			job.Repository,
-			job.WorkflowName,
-			job.WorkflowID,
-			job.PipelineID,
-			job.JobName,
-			job.JobNumber,
-			job.QueuedAt.Format(time.RFC3339),
-			job.StartedAt.Format(time.RFC3339),
-			job.QueueTime,
-		)
-	}
-	w.Flush()
-}
-
 func main() {
 	app := &cli.App{
 		Name:  "circleci-queue-time",
