@@ -29,6 +29,8 @@ type JobQueueInfo struct {
 	StartedAt    time.Time     `json:"started_at"`
 	QueueTime    time.Duration `json:"queue_time"`
 	WorkflowName string        `json:"workflow_name"`
+	WorkflowID   string        `json:"workflow_id"`
+	PipelineID   string        `json:"pipeline_id"`
 }
 
 type JobResponse struct {
@@ -222,13 +224,15 @@ func (c *CircleCIClient) GetPipelineWorkflows(pipelineID string) (*PipelineWorkf
 
 func printTable(jobs []JobQueueInfo) {
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
-	fmt.Fprintln(w, "Repository\tWorkflow\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
-	fmt.Fprintln(w, "---------\t--------\t---\t------\t---------\t----------\t----------")
+	fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
+	fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t------\t---------\t----------\t----------")
 
 	for _, job := range jobs {
-		fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+		fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 			job.Repository,
 			job.WorkflowName,
+			job.WorkflowID,
+			job.PipelineID,
 			job.JobName,
 			job.JobNumber,
 			job.QueuedAt.Format(time.RFC3339),
@@ -301,14 +305,16 @@ func main() {
 					fmt.Println("]")
 				} else {
 					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
-					fmt.Fprintln(w, "Repository\tWorkflow\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
-					fmt.Fprintln(w, "---------\t--------\t---\t------\t---------\t----------\t----------")
+					fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
+					fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t------\t---------\t----------\t----------")
 					w.Flush()
 
 					for job := range jobsChan {
-						fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
 							job.Repository,
 							job.WorkflowName,
+							job.WorkflowID,
+							job.PipelineID,
 							job.JobName,
 							job.JobNumber,
 							job.QueuedAt.Format(time.RFC3339),
@@ -320,15 +326,11 @@ func main() {
 				}
 			}()
 
-			count := 0
+			count := 0 // パイプライン数のカウント
 			var nextPageToken string
 
 			// パイプラインの取得とジョブ情報の収集
 			for {
-				if count >= limit {
-					break
-				}
-
 				pipelines, err := client.GetPipelines(projectSlug, nextPageToken)
 				if err != nil {
 					close(jobsChan)
@@ -346,11 +348,9 @@ func main() {
 						continue
 					}
 
-					for _, workflow := range workflows.Items {
-						if count >= limit {
-							break
-						}
+					hasProcessedPipeline := false
 
+					for _, workflow := range workflows.Items {
 						jobs, err := client.GetWorkflowJobs(workflow.ID)
 						if err != nil {
 							fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
@@ -358,10 +358,6 @@ func main() {
 						}
 
 						for _, job := range jobs.Items {
-							if count >= limit {
-								break
-							}
-
 							jobDetails, err := client.GetJobDetails(projectSlug, job.JobNumber)
 							if err != nil {
 								fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
@@ -386,6 +382,8 @@ func main() {
 								StartedAt:    startedAt,
 								QueueTime:    startedAt.Sub(queuedAt),
 								WorkflowName: workflow.Name,
+								WorkflowID:   workflow.ID,
+								PipelineID:   pipeline.ID,
 							}
 
 							select {
@@ -393,10 +391,18 @@ func main() {
 								close(jobsChan)
 								return nil
 							case jobsChan <- info:
-								count++
+								hasProcessedPipeline = true
 							}
 						}
 					}
+
+					if hasProcessedPipeline {
+						count++
+					}
+				}
+
+				if count >= limit {
+					break
 				}
 
 				nextPageToken = pipelines.NextPageToken
