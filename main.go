@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"text/tabwriter"
 	"time"
 
@@ -159,8 +161,13 @@ func (c *CircleCIClient) GetWorkflowJobs(workflowID string) (*WorkflowJobsRespon
 	return &jobs, nil
 }
 
-func (c *CircleCIClient) GetPipelines(projectSlug string) (*PipelineResponse, error) {
-	url := fmt.Sprintf("https://circleci.com/api/v2/project/%s/pipeline", projectSlug)
+func (c *CircleCIClient) GetPipelines(projectSlug string, pageToken string) (*PipelineResponse, error) {
+	baseURL := fmt.Sprintf("https://circleci.com/api/v2/project/%s/pipeline", projectSlug)
+	url := baseURL
+	if pageToken != "" {
+		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
+	}
+
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -173,8 +180,6 @@ func (c *CircleCIClient) GetPipelines(projectSlug string) (*PipelineResponse, er
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Pipelines API Status: %s\n", resp.Status)
-
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
 		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
@@ -185,7 +190,6 @@ func (c *CircleCIClient) GetPipelines(projectSlug string) (*PipelineResponse, er
 		return nil, fmt.Errorf("JSON decode error: %v", err)
 	}
 
-	fmt.Printf("Found %d pipelines\n", len(pipelines.Items))
 	return &pipelines, nil
 }
 
@@ -257,73 +261,152 @@ func main() {
 				Value: "table",
 				Usage: "Output format (table, json)",
 			},
+			&cli.IntFlag{
+				Name:  "limit",
+				Value: 10,
+				Usage: "Number of jobs to fetch",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			projectSlug := strings.Replace(c.String("project"), "github/", "gh/", 1)
+			limit := c.Int("limit")
 
 			client := &CircleCIClient{
 				Token:  c.String("token"),
 				Client: &http.Client{},
 			}
 
-			fmt.Printf("Fetching pipelines for project: %s\n", projectSlug)
-			pipelines, err := client.GetPipelines(projectSlug)
-			if err != nil {
-				return err
-			}
+			// チャネルを作成
+			jobsChan := make(chan JobQueueInfo)
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
 
-			var allJobs []JobQueueInfo
-			for _, pipeline := range pipelines.Items {
-				workflows, err := client.GetPipelineWorkflows(pipeline.ID)
-				if err != nil {
-					fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
-					continue
+			// 出力用のWaitGroup
+			var wg sync.WaitGroup
+			wg.Add(1)
+
+			// 出力処理を開始
+			go func() {
+				defer wg.Done()
+				if c.String("format") == "json" {
+					fmt.Println("[")
+					first := true
+					for job := range jobsChan {
+						if !first {
+							fmt.Println(",")
+						}
+						json.NewEncoder(os.Stdout).Encode(job)
+						first = false
+					}
+					fmt.Println("]")
+				} else {
+					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
+					fmt.Fprintln(w, "Repository\tWorkflow\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
+					fmt.Fprintln(w, "---------\t--------\t---\t------\t---------\t----------\t----------")
+					w.Flush()
+
+					for job := range jobsChan {
+						fmt.Fprintf(w, "%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+							job.Repository,
+							job.WorkflowName,
+							job.JobName,
+							job.JobNumber,
+							job.QueuedAt.Format(time.RFC3339),
+							job.StartedAt.Format(time.RFC3339),
+							job.QueueTime,
+						)
+						w.Flush()
+					}
+				}
+			}()
+
+			count := 0
+			var nextPageToken string
+
+			// パイプラインの取得とジョブ情報の収集
+			for {
+				if count >= limit {
+					break
 				}
 
-				for _, workflow := range workflows.Items {
-					jobs, err := client.GetWorkflowJobs(workflow.ID)
+				pipelines, err := client.GetPipelines(projectSlug, nextPageToken)
+				if err != nil {
+					close(jobsChan)
+					return err
+				}
+
+				for _, pipeline := range pipelines.Items {
+					if count >= limit {
+						break
+					}
+
+					workflows, err := client.GetPipelineWorkflows(pipeline.ID)
 					if err != nil {
-						fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
+						fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
 						continue
 					}
 
-					for _, job := range jobs.Items {
-						jobDetails, err := client.GetJobDetails(projectSlug, job.JobNumber)
+					for _, workflow := range workflows.Items {
+						if count >= limit {
+							break
+						}
+
+						jobs, err := client.GetWorkflowJobs(workflow.ID)
 						if err != nil {
-							fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
+							fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
 							continue
 						}
 
-						queuedAt, err := time.Parse(time.RFC3339, jobDetails.QueuedAt)
-						if err != nil {
-							continue
-						}
+						for _, job := range jobs.Items {
+							if count >= limit {
+								break
+							}
 
-						startedAt, err := time.Parse(time.RFC3339, jobDetails.StartedAt)
-						if err != nil {
-							continue
-						}
+							jobDetails, err := client.GetJobDetails(projectSlug, job.JobNumber)
+							if err != nil {
+								fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
+								continue
+							}
 
-						info := JobQueueInfo{
-							Repository:   jobDetails.Project.Slug,
-							JobName:      jobDetails.Name,
-							JobNumber:    jobDetails.Number,
-							QueuedAt:     queuedAt,
-							StartedAt:    startedAt,
-							QueueTime:    startedAt.Sub(queuedAt),
-							WorkflowName: workflow.Name,
+							queuedAt, err := time.Parse(time.RFC3339, jobDetails.QueuedAt)
+							if err != nil {
+								continue
+							}
+
+							startedAt, err := time.Parse(time.RFC3339, jobDetails.StartedAt)
+							if err != nil {
+								continue
+							}
+
+							info := JobQueueInfo{
+								Repository:   jobDetails.Project.Slug,
+								JobName:      jobDetails.Name,
+								JobNumber:    jobDetails.Number,
+								QueuedAt:     queuedAt,
+								StartedAt:    startedAt,
+								QueueTime:    startedAt.Sub(queuedAt),
+								WorkflowName: workflow.Name,
+							}
+
+							select {
+							case <-ctx.Done():
+								close(jobsChan)
+								return nil
+							case jobsChan <- info:
+								count++
+							}
 						}
-						allJobs = append(allJobs, info)
 					}
+				}
+
+				nextPageToken = pipelines.NextPageToken
+				if nextPageToken == "" {
+					break
 				}
 			}
 
-			if c.String("format") == "json" {
-				json.NewEncoder(os.Stdout).Encode(allJobs)
-			} else {
-				printTable(allJobs)
-			}
-
+			close(jobsChan)
+			wg.Wait()
 			return nil
 		},
 	}
