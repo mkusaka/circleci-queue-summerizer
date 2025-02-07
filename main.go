@@ -131,19 +131,10 @@ func (c *CircleCIClient) GetWorkflows(projectSlug string) (*WorkflowResponse, er
 	}
 	defer resp.Body.Close()
 
-	fmt.Printf("Workflows API Status: %s\n", resp.Status)
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
-	}
-
 	var workflows WorkflowResponse
 	if err := json.NewDecoder(resp.Body).Decode(&workflows); err != nil {
 		return nil, fmt.Errorf("JSON decode error: %v", err)
 	}
-
-	fmt.Printf("Found %d workflows\n", len(workflows.Items))
 
 	return &workflows, nil
 }
@@ -171,7 +162,6 @@ func (c *CircleCIClient) GetWorkflowJobs(workflowID string) (*WorkflowJobsRespon
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %v", err)
 	}
-	fmt.Printf("Workflow %s jobs response: %s\n", workflowID, string(body))
 
 	var jobs WorkflowJobsResponse
 	if err := json.Unmarshal(body, &jobs); err != nil {
