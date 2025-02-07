@@ -333,7 +333,7 @@ func main() {
 					for {
 						pipelines, err := client.GetPipelines(slug, nextPageToken)
 						if err != nil {
-							errChan <- fmt.Errorf("error fetching pipelines for %s: %v", slug, err)
+							errChan <- fmt.Errorf("\n❌ Error in %s:\n   %v", slug, err)
 							return
 						}
 
@@ -353,20 +353,21 @@ func main() {
 							for _, workflow := range workflows.Items {
 								jobs, err := client.GetWorkflowJobs(workflow.ID)
 								if err != nil {
-									fmt.Printf("Error getting jobs for workflow %s: %v\n", workflow.ID, err)
+									fmt.Printf("\n⚠️  Workflow %s (%s):\n   %v\n", workflow.Name, workflow.ID, err)
 									continue
 								}
 
 								for _, job := range jobs.Items {
-									if job.Status == "running" {
-										fmt.Printf("Skipping running job (Workflow: https://circleci.com/workflow-run/%s)\n",
+									if job.JobNumber == 0 {
+										fmt.Fprintf(os.Stderr, "Skipping job with number 0 (Workflow: https://circleci.com/workflow-run/%s)\n",
 											workflow.ID)
 										continue
 									}
 
 									jobDetails, err := client.GetJobDetails(slug, job.JobNumber)
 									if err != nil {
-										fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
+										fmt.Fprintf(os.Stderr, "\n⚠️  Job %d in workflow %s:\n   %v\n",
+											job.JobNumber, workflow.Name, err)
 										continue
 									}
 
@@ -434,7 +435,11 @@ func main() {
 			wg.Wait()
 
 			if len(errors) > 0 {
-				return fmt.Errorf("encountered errors: %v", errors)
+				fmt.Fprintln(os.Stderr, "\n🚫 Errors encountered:")
+				for _, err := range errors {
+					fmt.Fprintln(os.Stderr, err)
+				}
+				return fmt.Errorf("failed with %d error(s)", len(errors))
 			}
 
 			return nil
