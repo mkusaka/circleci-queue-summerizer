@@ -25,6 +25,8 @@ type JobQueueInfo struct {
 	Repository   string        `json:"repository"`
 	JobName      string        `json:"job_name"`
 	JobNumber    int           `json:"job_number"`
+	JobID        string        `json:"job_id"`
+	Status       string        `json:"status"`
 	QueuedAt     time.Time     `json:"queued_at"`
 	StartedAt    time.Time     `json:"started_at"`
 	QueueTime    time.Duration `json:"queue_time"`
@@ -55,6 +57,7 @@ type WorkflowJobsResponse struct {
 	Items []struct {
 		JobNumber int    `json:"job_number"`
 		ID        string `json:"id"`
+		Status    string `json:"status"`
 	} `json:"items"`
 	NextPageToken string `json:"next_page_token"`
 }
@@ -95,12 +98,20 @@ func (c *CircleCIClient) GetJobDetails(projectSlug string, jobNumber int) (*JobR
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error for job %d: %s - %s (URL: %s)",
+			jobNumber, resp.Status, string(body), url)
+	}
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body for job %d: %v", jobNumber, err)
 	}
 
 	var job JobResponse
-	if err := json.NewDecoder(resp.Body).Decode(&job); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &job); err != nil {
+		return nil, fmt.Errorf("JSON decode error for job %d: %v (body: %s)",
+			jobNumber, err, string(body))
 	}
 
 	return &job, nil
@@ -152,12 +163,19 @@ func (c *CircleCIClient) GetWorkflowJobs(workflowID string) (*WorkflowJobsRespon
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("API error: %s", resp.Status)
+		body, _ := io.ReadAll(resp.Body)
+		return nil, fmt.Errorf("API error: %s - %s (URL: %s)", resp.Status, string(body), url)
 	}
 
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read response body: %v", err)
+	}
+	fmt.Printf("Workflow %s jobs response: %s\n", workflowID, string(body))
+
 	var jobs WorkflowJobsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&jobs); err != nil {
-		return nil, err
+	if err := json.Unmarshal(body, &jobs); err != nil {
+		return nil, fmt.Errorf("JSON decode error: %v (body: %s)", err, string(body))
 	}
 
 	return &jobs, nil
@@ -285,18 +303,20 @@ func main() {
 					fmt.Println("]")
 				} else {
 					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
-					fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tNumber\tQueued At\tStarted At\tQueue Time")
-					fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t------\t---------\t----------\t----------")
+					fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
+					fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t---------\t----------\t----------")
 					w.Flush()
 
 					for job := range jobsChan {
-						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\n",
+						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
 							job.Repository,
 							job.WorkflowName,
 							job.WorkflowID,
 							job.PipelineID,
 							job.JobName,
+							job.JobID,
 							job.JobNumber,
+							job.Status,
 							job.QueuedAt.Format(time.RFC3339),
 							job.StartedAt.Format(time.RFC3339),
 							job.QueueTime,
@@ -348,6 +368,12 @@ func main() {
 								}
 
 								for _, job := range jobs.Items {
+									if job.Status == "running" {
+										fmt.Printf("Skipping running job (Workflow: https://circleci.com/workflow-run/%s)\n",
+											workflow.ID)
+										continue
+									}
+
 									jobDetails, err := client.GetJobDetails(slug, job.JobNumber)
 									if err != nil {
 										fmt.Printf("Error getting details for job %d: %v\n", job.JobNumber, err)
@@ -368,6 +394,8 @@ func main() {
 										Repository:   jobDetails.Project.Slug,
 										JobName:      jobDetails.Name,
 										JobNumber:    jobDetails.Number,
+										JobID:        job.ID,
+										Status:       job.Status,
 										QueuedAt:     queuedAt,
 										StartedAt:    startedAt,
 										QueueTime:    startedAt.Sub(queuedAt),
