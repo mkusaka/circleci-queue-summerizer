@@ -44,6 +44,9 @@ circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 --limit 30
 
 # Output in JSON format
 circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 --format json
+
+# Silent mode (only errors)
+circleci-queue-summerizer -p gh/org/repo1 --silent
 ```
 
 ### Options
@@ -53,6 +56,7 @@ circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 --format json
 --token, -t       CircleCI API token (can also be set via CIRCLECI_TOKEN env var)
 --limit           Number of pipelines to fetch per project (default: 10)
 --format          Output format (table or json, default: table)
+--silent          Suppress all output except errors
 ```
 
 ### Output Example

@@ -257,6 +257,10 @@ func main() {
 				Value: 10,
 				Usage: "Number of jobs to fetch",
 			},
+			&cli.BoolFlag{
+				Name:  "silent",
+				Usage: "Suppress all output except errors",
+			},
 		},
 		Action: func(c *cli.Context) error {
 			projects := c.StringSlice("project")
@@ -280,6 +284,14 @@ func main() {
 			// 出力処理を開始
 			go func() {
 				defer wg.Done()
+				if c.Bool("silent") {
+					// サイレントモードの場合は出力をスキップ
+					for range jobsChan {
+						// チャネルを空にするだけ
+					}
+					return
+				}
+
 				if c.String("format") == "json" {
 					fmt.Println("[")
 					first := true
@@ -359,8 +371,10 @@ func main() {
 
 								for _, job := range jobs.Items {
 									if job.JobNumber == 0 {
-										fmt.Fprintf(os.Stderr, "Skipping job with number 0 (Workflow: https://circleci.com/workflow-run/%s)\n",
-											workflow.ID)
+										if !c.Bool("silent") {
+											fmt.Fprintf(os.Stderr, "Skipping job with number 0 (Workflow: https://circleci.com/workflow-run/%s)\n",
+												workflow.ID)
+										}
 										continue
 									}
 
