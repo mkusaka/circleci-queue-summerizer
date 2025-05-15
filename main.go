@@ -310,7 +310,7 @@ func main() {
 					w.Flush()
 
 					for job := range jobsChan {
-						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\n",
+						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n",
 							job.Repository,
 							job.WorkflowName,
 							job.WorkflowID,
@@ -321,7 +321,7 @@ func main() {
 							job.Status,
 							job.QueuedAt.Format(time.RFC3339),
 							job.StartedAt.Format(time.RFC3339),
-							job.QueueTime,
+							int64(job.QueueTime),
 						)
 						w.Flush()
 					}
