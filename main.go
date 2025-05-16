@@ -322,7 +322,7 @@ func main() {
 							job.Status,
 							job.QueuedAt.Format(time.RFC3339),
 							job.StartedAt.Format(time.RFC3339),
-							int64(job.QueueTime),
+							int64(job.QueueTime.Seconds()),
 						)
 					}
 				}
