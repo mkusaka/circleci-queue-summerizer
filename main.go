@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"strings"
 	"sync"
 	"time"
@@ -82,9 +83,9 @@ type PipelineWorkflowResponse struct {
 	} `json:"items"`
 }
 
-func (c *CircleCIClient) GetJobDetails(projectSlug string, jobNumber int) (*JobResponse, error) {
+func (c *CircleCIClient) GetJobDetails(ctx context.Context, projectSlug string, jobNumber int) (*JobResponse, error) {
 	url := fmt.Sprintf("https://circleci.com/api/v2/project/%s/job/%d", projectSlug, jobNumber)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -116,9 +117,9 @@ func (c *CircleCIClient) GetJobDetails(projectSlug string, jobNumber int) (*JobR
 	return &job, nil
 }
 
-func (c *CircleCIClient) GetWorkflows(projectSlug string) (*WorkflowResponse, error) {
+func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (*WorkflowResponse, error) {
 	url := fmt.Sprintf("https://circleci.com/api/v2/insights/%s/workflows/summary", projectSlug)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -138,9 +139,9 @@ func (c *CircleCIClient) GetWorkflows(projectSlug string) (*WorkflowResponse, er
 	return &workflows, nil
 }
 
-func (c *CircleCIClient) GetWorkflowJobs(workflowID string) (*WorkflowJobsResponse, error) {
+func (c *CircleCIClient) GetWorkflowJobs(ctx context.Context, workflowID string) (*WorkflowJobsResponse, error) {
 	url := fmt.Sprintf("https://circleci.com/api/v2/workflow/%s/job", workflowID)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -170,14 +171,14 @@ func (c *CircleCIClient) GetWorkflowJobs(workflowID string) (*WorkflowJobsRespon
 	return &jobs, nil
 }
 
-func (c *CircleCIClient) GetPipelines(projectSlug string, pageToken string) (*PipelineResponse, error) {
+func (c *CircleCIClient) GetPipelines(ctx context.Context, projectSlug string, pageToken string) (*PipelineResponse, error) {
 	baseURL := fmt.Sprintf("https://circleci.com/api/v2/project/%s/pipeline", projectSlug)
 	url := baseURL
 	if pageToken != "" {
 		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
 	}
 
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -202,9 +203,9 @@ func (c *CircleCIClient) GetPipelines(projectSlug string, pageToken string) (*Pi
 	return &pipelines, nil
 }
 
-func (c *CircleCIClient) GetPipelineWorkflows(pipelineID string) (*PipelineWorkflowResponse, error) {
+func (c *CircleCIClient) GetPipelineWorkflows(ctx context.Context, pipelineID string) (*PipelineWorkflowResponse, error) {
 	url := fmt.Sprintf("https://circleci.com/api/v2/pipeline/%s/workflow", pipelineID)
-	req, err := http.NewRequest("GET", url, nil)
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -270,11 +271,13 @@ func main() {
 				Client: &http.Client{},
 			}
 
+			// SIGINTなどでキャンセル可能なコンテキストを作成
+			ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, os.Kill)
+			defer stop()
+
 			// チャネルを作成
 			jobsChan := make(chan JobQueueInfo)
 			errChan := make(chan error, len(projects))
-			ctx, cancel := context.WithCancel(context.Background())
-			defer cancel()
 
 			// 出力用のWaitGroup
 			var wg sync.WaitGroup
@@ -340,7 +343,15 @@ func main() {
 
 					// パイプラインの取得とジョブ情報の収集
 					for {
-						pipelines, err := client.GetPipelines(slug, nextPageToken)
+						// コンテキストがキャンセルされたら終了
+						select {
+						case <-ctx.Done():
+							return
+						default:
+							// 処理続行
+						}
+
+						pipelines, err := client.GetPipelines(ctx, slug, nextPageToken)
 						if err != nil {
 							errChan <- fmt.Errorf("\n❌ Error in %s:\n   %v", slug, err)
 							return
@@ -351,7 +362,15 @@ func main() {
 								break
 							}
 
-							workflows, err := client.GetPipelineWorkflows(pipeline.ID)
+							// コンテキストがキャンセルされたら終了
+							select {
+							case <-ctx.Done():
+								return
+							default:
+								// 処理続行
+							}
+
+							workflows, err := client.GetPipelineWorkflows(ctx, pipeline.ID)
 							if err != nil {
 								fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
 								continue
@@ -360,13 +379,29 @@ func main() {
 							hasProcessedPipeline := false
 
 							for _, workflow := range workflows.Items {
-								jobs, err := client.GetWorkflowJobs(workflow.ID)
+								// コンテキストがキャンセルされたら終了
+								select {
+								case <-ctx.Done():
+									return
+								default:
+									// 処理続行
+								}
+
+								jobs, err := client.GetWorkflowJobs(ctx, workflow.ID)
 								if err != nil {
 									fmt.Printf("\n⚠️  Workflow %s (%s):\n   %v\n", workflow.Name, workflow.ID, err)
 									continue
 								}
 
 								for _, job := range jobs.Items {
+									// コンテキストがキャンセルされたら終了
+									select {
+									case <-ctx.Done():
+										return
+									default:
+										// 処理続行
+									}
+
 									if job.JobNumber == 0 {
 										if !c.Bool("silent") {
 											fmt.Fprintf(os.Stderr, "Skipping job with number 0 (Workflow: https://circleci.com/workflow-run/%s)\n",
@@ -375,7 +410,7 @@ func main() {
 										continue
 									}
 
-									jobDetails, err := client.GetJobDetails(slug, job.JobNumber)
+									jobDetails, err := client.GetJobDetails(ctx, slug, job.JobNumber)
 									if err != nil {
 										fmt.Fprintf(os.Stderr, "\n⚠️  Job %d in workflow %s:\n   %v\n",
 											job.JobNumber, workflow.Name, err)
