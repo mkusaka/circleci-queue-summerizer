@@ -10,7 +10,6 @@ import (
 	"os"
 	"strings"
 	"sync"
-	"text/tabwriter"
 	"time"
 
 	"github.com/urfave/cli/v2"
@@ -304,13 +303,12 @@ func main() {
 					}
 					fmt.Println("]")
 				} else {
-					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, '\t', tabwriter.TabIndent)
-					fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
-					fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t---------\t----------\t----------")
-					w.Flush()
+					// ヘッダー行
+					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
+					fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t---------\t----------\t----------")
 
 					for job := range jobsChan {
-						fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n",
+						fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n",
 							job.Repository,
 							job.WorkflowName,
 							job.WorkflowID,
@@ -323,7 +321,6 @@ func main() {
 							job.StartedAt.Format(time.RFC3339),
 							int64(job.QueueTime),
 						)
-						w.Flush()
 					}
 				}
 			}()
