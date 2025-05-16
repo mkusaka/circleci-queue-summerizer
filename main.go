@@ -304,7 +304,7 @@ func main() {
 					}
 					fmt.Println("]")
 				} else {
-					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, ' ', tabwriter.TabIndent)
+					w := tabwriter.NewWriter(os.Stdout, 0, 0, 3, '\t', tabwriter.TabIndent)
 					fmt.Fprintln(w, "Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
 					fmt.Fprintln(w, "---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t---------\t----------\t----------")
 					w.Flush()
