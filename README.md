@@ -7,6 +7,7 @@ A CLI tool to analyze queue times of CircleCI jobs.
 - Fetch queue times for recent pipelines in specified projects
 - Support multiple projects at once
 - Configurable number of pipelines to analyze
+- Time-based filtering with `--months` flag
 - Output in table or JSON format
 - Detailed information including workflow IDs, pipeline IDs, and job statuses
 - Skip running jobs automatically
@@ -42,6 +43,9 @@ circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 -p gh/org/repo3
 # Get queue times for the last 30 pipelines
 circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 --limit 30
 
+# Get queue times for the last 3 months
+circleci-queue-summerizer -p gh/org/repo1 --months 3
+
 # Output in JSON format
 circleci-queue-summerizer -p gh/org/repo1 -p gh/org/repo2 --format json
 
@@ -55,6 +59,7 @@ circleci-queue-summerizer -p gh/org/repo1 --silent
 --project, -p     Project slug (required, e.g., gh/org/repo). Can be specified multiple times
 --token, -t       CircleCI API token (can also be set via CIRCLECI_TOKEN env var)
 --limit           Number of pipelines to fetch per project (default: 10)
+--months          Number of months to look back (default: 1)
 --format          Output format (table or json, default: table)
 --silent          Suppress all output except errors
 ```
