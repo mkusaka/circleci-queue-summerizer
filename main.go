@@ -270,6 +270,7 @@ func main() {
 		Action: func(c *cli.Context) error {
 			projects := c.StringSlice("project")
 			limit := c.Int("limit")
+			monthsSet := c.IsSet("months")
 			cutoff := time.Now().AddDate(0, -c.Int("months"), 0)
 
 			client := &CircleCIClient{
@@ -365,7 +366,7 @@ func main() {
 
 						tooOld := false
 						for _, pipeline := range pipelines.Items {
-							if count >= limit {
+							if !monthsSet && count >= limit {
 								break
 							}
 
@@ -469,7 +470,7 @@ func main() {
 							}
 						}
 
-						if tooOld || count >= limit {
+						if tooOld || (!monthsSet && count >= limit) {
 							break
 						}
 
