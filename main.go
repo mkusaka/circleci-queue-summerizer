@@ -30,6 +30,8 @@ type JobQueueInfo struct {
 	CreatedAt    time.Time     `json:"created_at"`
 	QueuedAt     time.Time     `json:"queued_at"`
 	StartedAt    time.Time     `json:"started_at"`
+	StoppedAt    time.Time     `json:"stopped_at"`
+	Duration     int           `json:"duration"`
 	QueueTime    time.Duration `json:"queue_time"`
 	WorkflowName string        `json:"workflow_name"`
 	WorkflowID   string        `json:"workflow_id"`
@@ -40,6 +42,8 @@ type JobResponse struct {
 	CreatedAt string `json:"created_at"`
 	QueuedAt  string `json:"queued_at"`
 	StartedAt string `json:"started_at"`
+	StoppedAt string `json:"stopped_at"`
+	Duration  int    `json:"duration"`
 	Name      string `json:"name"`
 	Number    int    `json:"number"`
 	Project   struct {
@@ -314,11 +318,11 @@ func main() {
 					}
 				} else {
 					// ヘッダー行
-					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tCreated At\tQueued At\tStarted At\tQueue Time")
-					fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t----------\t---------\t----------\t----------")
+					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tCreated At\tQueued At\tStarted At\tStopped At\tDuration\tQueue Time")
+					fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t----------\t---------\t----------\t----------\t--------\t----------")
 
 					for job := range jobsChan {
-						fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\n",
+						fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
 							job.Repository,
 							job.WorkflowName,
 							job.WorkflowID,
@@ -330,6 +334,8 @@ func main() {
 							job.CreatedAt.Format(time.RFC3339),
 							job.QueuedAt.Format(time.RFC3339),
 							job.StartedAt.Format(time.RFC3339),
+							job.StoppedAt.Format(time.RFC3339),
+							job.Duration,
 							int64(job.QueueTime.Seconds()),
 						)
 					}
@@ -448,6 +454,8 @@ func main() {
 										continue
 									}
 
+									stoppedAt, _ := time.Parse(time.RFC3339, jobDetails.StoppedAt)
+
 									info := JobQueueInfo{
 										Repository:   jobDetails.Project.Slug,
 										JobName:      jobDetails.Name,
@@ -457,6 +465,8 @@ func main() {
 										CreatedAt:    createdAt,
 										QueuedAt:     queuedAt,
 										StartedAt:    startedAt,
+										StoppedAt:    stoppedAt,
+										Duration:     jobDetails.Duration,
 										QueueTime:    startedAt.Sub(createdAt),
 										WorkflowName: workflow.Name,
 										WorkflowID:   workflow.ID,
