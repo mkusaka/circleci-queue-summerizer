@@ -27,6 +27,7 @@ type JobQueueInfo struct {
 	JobNumber    int           `json:"job_number"`
 	JobID        string        `json:"job_id"`
 	Status       string        `json:"status"`
+	CreatedAt    time.Time     `json:"created_at"`
 	QueuedAt     time.Time     `json:"queued_at"`
 	StartedAt    time.Time     `json:"started_at"`
 	QueueTime    time.Duration `json:"queue_time"`
@@ -36,6 +37,7 @@ type JobQueueInfo struct {
 }
 
 type JobResponse struct {
+	CreatedAt string `json:"created_at"`
 	QueuedAt  string `json:"queued_at"`
 	StartedAt string `json:"started_at"`
 	Name      string `json:"name"`
@@ -312,11 +314,11 @@ func main() {
 					}
 				} else {
 					// ヘッダー行
-					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
-					fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t---------\t----------\t----------")
+					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tCreated At\tQueued At\tStarted At\tQueue Time")
+					fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t----------\t---------\t----------\t----------")
 
 					for job := range jobsChan {
-						fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%d\n",
+						fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%d\n",
 							job.Repository,
 							job.WorkflowName,
 							job.WorkflowID,
@@ -325,6 +327,7 @@ func main() {
 							job.JobID,
 							job.JobNumber,
 							job.Status,
+							job.CreatedAt.Format(time.RFC3339),
 							job.QueuedAt.Format(time.RFC3339),
 							job.StartedAt.Format(time.RFC3339),
 							int64(job.QueueTime.Seconds()),
@@ -430,6 +433,11 @@ func main() {
 										continue
 									}
 
+									createdAt, err := time.Parse(time.RFC3339, jobDetails.CreatedAt)
+									if err != nil {
+										continue
+									}
+
 									queuedAt, err := time.Parse(time.RFC3339, jobDetails.QueuedAt)
 									if err != nil {
 										continue
@@ -446,9 +454,10 @@ func main() {
 										JobNumber:    jobDetails.Number,
 										JobID:        job.ID,
 										Status:       job.Status,
+										CreatedAt:    createdAt,
 										QueuedAt:     queuedAt,
 										StartedAt:    startedAt,
-										QueueTime:    startedAt.Sub(queuedAt),
+										QueueTime:    startedAt.Sub(createdAt),
 										WorkflowName: workflow.Name,
 										WorkflowID:   workflow.ID,
 										PipelineID:   pipeline.ID,
