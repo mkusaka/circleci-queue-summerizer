@@ -257,6 +257,11 @@ func main() {
 				Value: 10,
 				Usage: "Number of jobs to fetch",
 			},
+			&cli.IntFlag{
+				Name:  "months",
+				Value: 1,
+				Usage: "Number of months to look back",
+			},
 			&cli.BoolFlag{
 				Name:  "silent",
 				Usage: "Suppress all output except errors",
@@ -265,6 +270,7 @@ func main() {
 		Action: func(c *cli.Context) error {
 			projects := c.StringSlice("project")
 			limit := c.Int("limit")
+			cutoff := time.Now().AddDate(0, -c.Int("months"), 0)
 
 			client := &CircleCIClient{
 				Token:  c.String("token"),
@@ -357,8 +363,16 @@ func main() {
 							return
 						}
 
+						tooOld := false
 						for _, pipeline := range pipelines.Items {
 							if count >= limit {
+								break
+							}
+
+							// パイプラインの作成日時が期間外なら打ち切り
+							pipelineCreatedAt, err := time.Parse(time.RFC3339, pipeline.CreatedAt)
+							if err == nil && pipelineCreatedAt.Before(cutoff) {
+								tooOld = true
 								break
 							}
 
@@ -455,7 +469,7 @@ func main() {
 							}
 						}
 
-						if count >= limit {
+						if tooOld || count >= limit {
 							break
 						}
 
