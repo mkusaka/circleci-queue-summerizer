@@ -250,7 +250,7 @@ func main() {
 			&cli.StringFlag{
 				Name:  "format",
 				Value: "table",
-				Usage: "Output format (table, json)",
+				Usage: "Output format (table, ndjson)",
 			},
 			&cli.IntFlag{
 				Name:  "limit",
@@ -301,17 +301,10 @@ func main() {
 					return
 				}
 
-				if c.String("format") == "json" {
-					fmt.Println("[")
-					first := true
+				if c.String("format") == "ndjson" {
 					for job := range jobsChan {
-						if !first {
-							fmt.Println(",")
-						}
 						json.NewEncoder(os.Stdout).Encode(job)
-						first = false
 					}
-					fmt.Println("]")
 				} else {
 					// ヘッダー行
 					fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tQueued At\tStarted At\tQueue Time")
