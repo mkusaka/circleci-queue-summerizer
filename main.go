@@ -268,6 +268,11 @@ func main() {
 			},
 		},
 		Action: func(c *cli.Context) error {
+			format := c.String("format")
+			if format != "table" && format != "ndjson" {
+				return fmt.Errorf("invalid format %q: must be table or ndjson", format)
+			}
+
 			projects := c.StringSlice("project")
 			limit := c.Int("limit")
 			monthsSet := c.IsSet("months")
@@ -301,7 +306,7 @@ func main() {
 					return
 				}
 
-				if c.String("format") == "ndjson" {
+				if format == "ndjson" {
 					for job := range jobsChan {
 						json.NewEncoder(os.Stdout).Encode(job)
 					}
