@@ -394,7 +394,7 @@ func main() {
 
 							workflows, err := client.GetPipelineWorkflows(ctx, pipeline.ID)
 							if err != nil {
-								fmt.Printf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
+								fmt.Fprintf(os.Stderr, "Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
 								continue
 							}
 
@@ -411,7 +411,7 @@ func main() {
 
 								jobs, err := client.GetWorkflowJobs(ctx, workflow.ID)
 								if err != nil {
-									fmt.Printf("\n⚠️  Workflow %s (%s):\n   %v\n", workflow.Name, workflow.ID, err)
+									fmt.Fprintf(os.Stderr, "\n⚠️  Workflow %s (%s):\n   %v\n", workflow.Name, workflow.ID, err)
 									continue
 								}
 
