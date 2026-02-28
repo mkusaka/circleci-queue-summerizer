@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -771,4 +774,504 @@ func TestSQLiteEndToEnd(t *testing.T) {
 			projectCount, pipelineCount, workflowCount, jobCount)
 	}
 
+}
+
+// --- CLI validation tests ---
+
+func TestCLI_InvalidFormat(t *testing.T) {
+	app := newApp()
+	err := app.Run([]string{"app", "-p", "gh/org/repo", "--format", "csv", "--token", "dummy"})
+	if err == nil {
+		t.Fatal("expected error for invalid format")
+	}
+	if !strings.Contains(err.Error(), "invalid format") {
+		t.Errorf("error = %q, want to contain 'invalid format'", err.Error())
+	}
+}
+
+func TestCLI_SqliteWithoutOutput(t *testing.T) {
+	app := newApp()
+	err := app.Run([]string{"app", "-p", "gh/org/repo", "--format", "sqlite", "--token", "dummy"})
+	if err == nil {
+		t.Fatal("expected error for sqlite without --output")
+	}
+	if !strings.Contains(err.Error(), "--output flag is required") {
+		t.Errorf("error = %q, want to contain '--output flag is required'", err.Error())
+	}
+}
+
+// --- Mock API server for integration tests ---
+
+// newMockCircleCIServer creates a mock server that responds to the
+// CircleCI API endpoints used by processProject.
+func newMockCircleCIServer(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{
+					{
+						ID:          "pipe-1",
+						ProjectSlug: "gh/org/repo",
+						Number:      1,
+						State:       "created",
+						CreatedAt:   time.Now().Format(time.RFC3339),
+						UpdatedAt:   time.Now().Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/job/"):
+			json.NewEncoder(w).Encode(JobResponse{
+				CreatedAt: "2026-01-15T10:00:00Z",
+				QueuedAt:  "2026-01-15T10:00:01Z",
+				StartedAt: "2026-01-15T10:00:05Z",
+				StoppedAt: "2026-01-15T10:01:00Z",
+				Duration:  55000,
+				Name:      "test-job",
+				Number:    1,
+				WebURL:    "https://circleci.com/jobs/1",
+				Status:    "success",
+			})
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo"):
+			json.NewEncoder(w).Encode(ProjectResponse{
+				ID:               "proj-1",
+				Slug:             "gh/org/repo",
+				Name:             "repo",
+				OrganizationName: "org",
+			})
+		case strings.HasPrefix(path, "/api/v2/pipeline/pipe-1/workflow"):
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{
+					{
+						ID:         "wf-1",
+						PipelineID: "pipe-1",
+						Name:       "build",
+						Status:     "success",
+						CreatedAt:  time.Now().Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/wf-1/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{
+					{
+						ID:          "job-1",
+						Name:        "test-job",
+						Type:        "build",
+						Status:      "success",
+						JobNumber:   1,
+						ProjectSlug: "gh/org/repo",
+					},
+				},
+			})
+		default:
+			t.Logf("unhandled path: %s", path)
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestProcessProject_SQLite(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+	})
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+
+	// Verify project inserted
+	var projectCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM projects").Scan(&projectCount)
+	if projectCount != 1 {
+		t.Errorf("projects count = %d, want 1", projectCount)
+	}
+
+	// Verify pipeline inserted
+	var pipelineCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM pipelines").Scan(&pipelineCount)
+	if pipelineCount != 1 {
+		t.Errorf("pipelines count = %d, want 1", pipelineCount)
+	}
+
+	// Verify workflow inserted
+	var workflowCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM workflows").Scan(&workflowCount)
+	if workflowCount != 1 {
+		t.Errorf("workflows count = %d, want 1", workflowCount)
+	}
+
+	// Verify job inserted with correct data
+	var jobCount int
+	var jobName, webURL string
+	var queueTimeMs int64
+	sw.db.QueryRow("SELECT COUNT(*) FROM jobs").Scan(&jobCount)
+	if jobCount != 1 {
+		t.Errorf("jobs count = %d, want 1", jobCount)
+	}
+	sw.db.QueryRow("SELECT name, web_url, queue_time_ms FROM jobs WHERE id='job-1'").Scan(&jobName, &webURL, &queueTimeMs)
+	if jobName != "test-job" {
+		t.Errorf("job name = %q, want %q", jobName, "test-job")
+	}
+	if webURL != "https://circleci.com/jobs/1" {
+		t.Errorf("web_url = %q, want %q", webURL, "https://circleci.com/jobs/1")
+	}
+	if queueTimeMs != 5000 {
+		t.Errorf("queue_time_ms = %d, want 5000", queueTimeMs)
+	}
+}
+
+func TestProcessProject_SQLite_Upsert(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	cfg := processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+	}
+
+	// Run twice
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (1st): %v", err)
+	}
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (2nd): %v", err)
+	}
+
+	// Counts should not change after 2nd run
+	var projectCount, pipelineCount, workflowCount, jobCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM projects").Scan(&projectCount)
+	sw.db.QueryRow("SELECT COUNT(*) FROM pipelines").Scan(&pipelineCount)
+	sw.db.QueryRow("SELECT COUNT(*) FROM workflows").Scan(&workflowCount)
+	sw.db.QueryRow("SELECT COUNT(*) FROM jobs").Scan(&jobCount)
+
+	if projectCount != 1 {
+		t.Errorf("projects count = %d, want 1", projectCount)
+	}
+	if pipelineCount != 1 {
+		t.Errorf("pipelines count = %d, want 1", pipelineCount)
+	}
+	if workflowCount != 1 {
+		t.Errorf("workflows count = %d, want 1", workflowCount)
+	}
+	if jobCount != 1 {
+		t.Errorf("jobs count = %d, want 1", jobCount)
+	}
+}
+
+func TestProcessProject_NDJSON(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	jobsChan := make(chan JobQueueInfo, 10)
+
+	err := processProject(context.Background(), processProjectConfig{
+		client:   client,
+		slug:     "gh/org/repo",
+		limit:    10,
+		cutoff:   time.Now().AddDate(0, -1, 0),
+		jobsChan: jobsChan,
+	})
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+	close(jobsChan)
+
+	var jobs []JobQueueInfo
+	for job := range jobsChan {
+		jobs = append(jobs, job)
+	}
+
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+
+	// Verify NDJSON output
+	var buf bytes.Buffer
+	json.NewEncoder(&buf).Encode(jobs[0])
+	line := buf.String()
+	if !strings.Contains(line, "test-job") {
+		t.Errorf("ndjson output should contain 'test-job', got %q", line)
+	}
+	if !strings.Contains(line, "queue_time") {
+		t.Errorf("ndjson output should contain 'queue_time', got %q", line)
+	}
+}
+
+func TestProcessProject_Table(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	jobsChan := make(chan JobQueueInfo, 10)
+
+	err := processProject(context.Background(), processProjectConfig{
+		client:   client,
+		slug:     "gh/org/repo",
+		limit:    10,
+		cutoff:   time.Now().AddDate(0, -1, 0),
+		jobsChan: jobsChan,
+	})
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+	close(jobsChan)
+
+	// Simulate table output
+	var buf bytes.Buffer
+	fmt.Fprintln(&buf, "Repository\tJob\tStatus")
+	for job := range jobsChan {
+		fmt.Fprintf(&buf, "%s\t%s\t%s\n", job.Repository, job.JobName, job.Status)
+	}
+
+	output := buf.String()
+	if !strings.Contains(output, "Repository") {
+		t.Errorf("table output should contain header, got %q", output)
+	}
+}
+
+// --- BaseURL tests ---
+
+func TestCircleCIClient_BaseURL(t *testing.T) {
+	c := &CircleCIClient{Token: "test"}
+	if c.baseURL() != "https://circleci.com" {
+		t.Errorf("default baseURL = %q, want %q", c.baseURL(), "https://circleci.com")
+	}
+
+	c.BaseURL = "http://localhost:8080"
+	if c.baseURL() != "http://localhost:8080" {
+		t.Errorf("custom baseURL = %q, want %q", c.baseURL(), "http://localhost:8080")
+	}
+}
+
+// --- Mock server for approval job ---
+
+func newMockCircleCIServerWithApproval(t *testing.T) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		switch {
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{
+					{
+						ID:          "pipe-1",
+						ProjectSlug: "gh/org/repo",
+						Number:      1,
+						State:       "created",
+						CreatedAt:   time.Now().Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/job/"):
+			json.NewEncoder(w).Encode(JobResponse{
+				CreatedAt: "2026-01-15T10:00:00Z",
+				QueuedAt:  "2026-01-15T10:00:01Z",
+				StartedAt: "2026-01-15T10:00:05Z",
+				StoppedAt: "2026-01-15T10:01:00Z",
+				Duration:  55000,
+				Name:      "build-job",
+				Number:    1,
+				Status:    "success",
+			})
+		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo"):
+			json.NewEncoder(w).Encode(ProjectResponse{
+				ID:   "proj-1",
+				Slug: "gh/org/repo",
+				Name: "repo",
+			})
+		case strings.HasPrefix(path, "/api/v2/pipeline/pipe-1/workflow"):
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{
+					{
+						ID:         "wf-1",
+						PipelineID: "pipe-1",
+						Name:       "deploy",
+						Status:     "success",
+						CreatedAt:  time.Now().Format(time.RFC3339),
+					},
+				},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/wf-1/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{
+					{
+						ID:        "build-job-1",
+						Name:      "build-job",
+						Type:      "build",
+						Status:    "success",
+						JobNumber: 1,
+					},
+					{
+						ID:         "approval-1",
+						Name:       "hold-for-deploy",
+						Type:       "approval",
+						Status:     "success",
+						JobNumber:  0,
+						ApprovedBy: "user-1",
+					},
+				},
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+}
+
+func TestProcessProject_SQLite_ApprovalJob(t *testing.T) {
+	server := newMockCircleCIServerWithApproval(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+	})
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+
+	// Should have 2 jobs: 1 build + 1 approval
+	var jobCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM jobs").Scan(&jobCount)
+	if jobCount != 2 {
+		t.Errorf("jobs count = %d, want 2 (build + approval)", jobCount)
+	}
+
+	// Approval job should have NULL detail columns
+	var createdAt sql.NullString
+	var queueTimeMs sql.NullInt64
+	sw.db.QueryRow("SELECT created_at, queue_time_ms FROM jobs WHERE type='approval'").Scan(&createdAt, &queueTimeMs)
+	if createdAt.Valid {
+		t.Error("approval job created_at should be NULL")
+	}
+	if queueTimeMs.Valid {
+		t.Error("approval job queue_time_ms should be NULL")
+	}
+
+	// Build job should have detail columns
+	var buildCreatedAt string
+	sw.db.QueryRow("SELECT created_at FROM jobs WHERE type='build'").Scan(&buildCreatedAt)
+	if buildCreatedAt != "2026-01-15T10:00:00Z" {
+		t.Errorf("build job created_at = %q, want %q", buildCreatedAt, "2026-01-15T10:00:00Z")
+	}
+}
+
+// --- Test that table/ndjson skip approval jobs ---
+
+func TestProcessProject_TableSkipsApproval(t *testing.T) {
+	server := newMockCircleCIServerWithApproval(t)
+	defer server.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	// Capture stderr to verify skip message
+	oldStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	jobsChan := make(chan JobQueueInfo, 10)
+	err := processProject(context.Background(), processProjectConfig{
+		client:   client,
+		slug:     "gh/org/repo",
+		limit:    10,
+		cutoff:   time.Now().AddDate(0, -1, 0),
+		jobsChan: jobsChan,
+	})
+
+	w.Close()
+	os.Stderr = oldStderr
+
+	var stderrBuf bytes.Buffer
+	stderrBuf.ReadFrom(r)
+
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+	close(jobsChan)
+
+	var jobs []JobQueueInfo
+	for job := range jobsChan {
+		jobs = append(jobs, job)
+	}
+
+	// Only build job should be in jobsChan (approval skipped)
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1 (approval should be skipped)", len(jobs))
+	}
+	if jobs[0].JobName != "build-job" {
+		t.Errorf("job name = %q, want %q", jobs[0].JobName, "build-job")
+	}
+
+	// Stderr should contain skip message for approval job
+	if !strings.Contains(stderrBuf.String(), "Skipping job with number 0") {
+		t.Errorf("stderr should contain skip message, got %q", stderrBuf.String())
+	}
 }
