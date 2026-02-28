@@ -20,6 +20,26 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+// --- Terminal Status Sets ---
+
+var terminalWorkflowStatuses = map[string]bool{
+	"success":      true,
+	"failed":       true,
+	"error":        true,
+	"canceled":     true,
+	"unauthorized": true,
+}
+
+var terminalJobStatuses = map[string]bool{
+	"success":             true,
+	"failed":              true,
+	"error":               true,
+	"canceled":            true,
+	"infrastructure_fail": true,
+	"timedout":            true,
+	"not_run":             true,
+}
+
 // --- API Response Types ---
 
 type PipelineItem struct {
@@ -663,6 +683,79 @@ func (w *SQLiteWriter) InsertJob(wj WorkflowJobItem, workflowID string, detail *
 	return err
 }
 
+// IsPipelineFullyProcessed returns true if the pipeline has at least one workflow,
+// all workflows are in a terminal status, and every workflow has at least one job.
+func (w *SQLiteWriter) IsPipelineFullyProcessed(pipelineID string) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	rows, err := w.db.Query(
+		`SELECT w.status, (SELECT COUNT(*) FROM jobs j WHERE j.workflow_id = w.id) as job_count
+		 FROM workflows w WHERE w.pipeline_id = ?`, pipelineID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	count := 0
+	for rows.Next() {
+		var status string
+		var jobCount int
+		if err := rows.Scan(&status, &jobCount); err != nil {
+			return false, err
+		}
+		if !terminalWorkflowStatuses[status] || jobCount == 0 {
+			return false, nil
+		}
+		count++
+	}
+	return count > 0, rows.Err()
+}
+
+// IsWorkflowFullyProcessed returns true if the workflow exists with a terminal status
+// and has at least one job stored.
+func (w *SQLiteWriter) IsWorkflowFullyProcessed(workflowID string) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var status string
+	err := w.db.QueryRow(`SELECT status FROM workflows WHERE id = ?`, workflowID).Scan(&status)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if !terminalWorkflowStatuses[status] {
+		return false, nil
+	}
+
+	var jobCount int
+	err = w.db.QueryRow(`SELECT COUNT(*) FROM jobs WHERE workflow_id = ?`, workflowID).Scan(&jobCount)
+	if err != nil {
+		return false, err
+	}
+	return jobCount > 0, nil
+}
+
+// IsJobComplete returns true if the job exists with a terminal status and has
+// detail data (created_at IS NOT NULL, indicating GetJobDetails was called).
+func (w *SQLiteWriter) IsJobComplete(jobID string) (bool, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+
+	var status string
+	var createdAt sql.NullString
+	err := w.db.QueryRow(`SELECT status, created_at FROM jobs WHERE id = ?`, jobID).Scan(&status, &createdAt)
+	if err == sql.ErrNoRows {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	return terminalJobStatuses[status] && createdAt.Valid, nil
+}
+
 func (w *SQLiteWriter) Close() error {
 	return w.db.Close()
 }
@@ -766,6 +859,17 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 				if err := cfg.sqliteWriter.InsertPipeline(pipeline); err != nil {
 					fmt.Fprintf(os.Stderr, "Warning: failed to insert pipeline %s: %v\n", pipeline.ID, err)
 				}
+
+				fullyProcessed, lookupErr := cfg.sqliteWriter.IsPipelineFullyProcessed(pipeline.ID)
+				if lookupErr != nil {
+					fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for pipeline %s: %v\n", pipeline.ID, lookupErr)
+				} else if fullyProcessed {
+					if !cfg.silent {
+						fmt.Fprintf(os.Stderr, "Skipping pipeline %s (fully processed in DB)\n", pipeline.ID)
+					}
+					count++
+					continue
+				}
 			}
 
 			// Fetch workflows with pagination
@@ -796,6 +900,17 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 				if cfg.sqliteWriter != nil {
 					if err := cfg.sqliteWriter.InsertWorkflow(workflow); err != nil {
 						fmt.Fprintf(os.Stderr, "Warning: failed to insert workflow %s: %v\n", workflow.ID, err)
+					}
+
+					wfProcessed, lookupErr := cfg.sqliteWriter.IsWorkflowFullyProcessed(workflow.ID)
+					if lookupErr != nil {
+						fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for workflow %s: %v\n", workflow.ID, lookupErr)
+					} else if wfProcessed {
+						if !cfg.silent {
+							fmt.Fprintf(os.Stderr, "Skipping workflow %s/%s (fully processed in DB)\n", workflow.Name, workflow.ID)
+						}
+						hasProcessedPipeline = true
+						continue
 					}
 				}
 
@@ -850,6 +965,19 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						}
 						hasProcessedPipeline = true
 						continue
+					}
+
+					if cfg.sqliteWriter != nil {
+						jobComplete, lookupErr := cfg.sqliteWriter.IsJobComplete(job.ID)
+						if lookupErr != nil {
+							fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for job %s: %v\n", job.ID, lookupErr)
+						} else if jobComplete {
+							if !cfg.silent {
+								fmt.Fprintf(os.Stderr, "Skipping job %s/%d (complete in DB)\n", job.Name, job.JobNumber)
+							}
+							hasProcessedPipeline = true
+							continue
+						}
 					}
 
 					jobDetails, err := cfg.client.GetJobDetails(ctx, slug, job.JobNumber)
