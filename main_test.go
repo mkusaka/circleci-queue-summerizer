@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -823,17 +822,29 @@ func newMockCircleCIServer(t *testing.T) *httptest.Server {
 				},
 			})
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/job/"):
-			json.NewEncoder(w).Encode(JobResponse{
-				CreatedAt: "2026-01-15T10:00:00Z",
-				QueuedAt:  "2026-01-15T10:00:01Z",
-				StartedAt: "2026-01-15T10:00:05Z",
-				StoppedAt: "2026-01-15T10:01:00Z",
-				Duration:  55000,
-				Name:      "test-job",
-				Number:    1,
-				WebURL:    "https://circleci.com/jobs/1",
-				Status:    "success",
-			})
+			jr := JobResponse{
+				CreatedAt:   "2026-01-15T10:00:00Z",
+				QueuedAt:    "2026-01-15T10:00:01Z",
+				StartedAt:   "2026-01-15T10:00:05Z",
+				StoppedAt:   "2026-01-15T10:01:00Z",
+				Duration:    55000,
+				Name:        "test-job",
+				Number:      1,
+				WebURL:      "https://circleci.com/jobs/1",
+				Parallelism: 2,
+				Status:      "success",
+			}
+			jr.Executor.ResourceClass = "medium"
+			jr.Executor.Type = "docker"
+			jr.Organization.Name = "org"
+			jr.Project.ID = "proj-1"
+			jr.Project.Slug = "gh/org/repo"
+			jr.Project.Name = "repo"
+			jr.Project.ExternalURL = "https://github.com/org/repo"
+			jr.LatestWorkflow.ID = "wf-1"
+			jr.LatestWorkflow.Name = "build"
+			jr.Pipeline.ID = "pipe-1"
+			json.NewEncoder(w).Encode(jr)
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo"):
 			json.NewEncoder(w).Encode(ProjectResponse{
 				ID:               "proj-1",
@@ -1029,15 +1040,22 @@ func TestProcessProject_NDJSON(t *testing.T) {
 		t.Fatalf("got %d jobs, want 1", len(jobs))
 	}
 
-	// Verify NDJSON output
+	// Verify NDJSON output contains new fields
 	var buf bytes.Buffer
 	json.NewEncoder(&buf).Encode(jobs[0])
 	line := buf.String()
-	if !strings.Contains(line, "test-job") {
-		t.Errorf("ndjson output should contain 'test-job', got %q", line)
+	for _, field := range []string{"test-job", "queue_time", "type", "web_url", "executor_resource_class", "executor_type", "organization_name", "project_id", "project_name", "latest_workflow_id"} {
+		if !strings.Contains(line, field) {
+			t.Errorf("ndjson output should contain %q, got %q", field, line)
+		}
 	}
-	if !strings.Contains(line, "queue_time") {
-		t.Errorf("ndjson output should contain 'queue_time', got %q", line)
+
+	// Verify the actual field values
+	if jobs[0].Type != "build" {
+		t.Errorf("Type = %q, want %q", jobs[0].Type, "build")
+	}
+	if jobs[0].WebURL != "https://circleci.com/jobs/1" {
+		t.Errorf("WebURL = %q, want %q", jobs[0].WebURL, "https://circleci.com/jobs/1")
 	}
 }
 
@@ -1065,16 +1083,34 @@ func TestProcessProject_Table(t *testing.T) {
 	}
 	close(jobsChan)
 
-	// Simulate table output
-	var buf bytes.Buffer
-	fmt.Fprintln(&buf, "Repository\tJob\tStatus")
+	var jobs []JobQueueInfo
 	for job := range jobsChan {
-		fmt.Fprintf(&buf, "%s\t%s\t%s\n", job.Repository, job.JobName, job.Status)
+		jobs = append(jobs, job)
 	}
 
-	output := buf.String()
-	if !strings.Contains(output, "Repository") {
-		t.Errorf("table output should contain header, got %q", output)
+	if len(jobs) != 1 {
+		t.Fatalf("got %d jobs, want 1", len(jobs))
+	}
+
+	// Verify new fields are populated
+	job := jobs[0]
+	if job.Type != "build" {
+		t.Errorf("Type = %q, want %q", job.Type, "build")
+	}
+	if job.ExecutorResourceClass != "medium" {
+		t.Errorf("ExecutorResourceClass = %q, want %q", job.ExecutorResourceClass, "medium")
+	}
+	if job.ExecutorType != "docker" {
+		t.Errorf("ExecutorType = %q, want %q", job.ExecutorType, "docker")
+	}
+	if job.OrganizationName != "org" {
+		t.Errorf("OrganizationName = %q, want %q", job.OrganizationName, "org")
+	}
+	if job.ProjectID != "proj-1" {
+		t.Errorf("ProjectID = %q, want %q", job.ProjectID, "proj-1")
+	}
+	if job.Parallelism != 2 {
+		t.Errorf("Parallelism = %d, want 2", job.Parallelism)
 	}
 }
 
@@ -1220,9 +1256,9 @@ func TestProcessProject_SQLite_ApprovalJob(t *testing.T) {
 	}
 }
 
-// --- Test that table/ndjson skip approval jobs ---
+// --- Test that table/ndjson include approval jobs ---
 
-func TestProcessProject_TableSkipsApproval(t *testing.T) {
+func TestProcessProject_IncludesApproval(t *testing.T) {
 	server := newMockCircleCIServerWithApproval(t)
 	defer server.Close()
 
@@ -1232,11 +1268,6 @@ func TestProcessProject_TableSkipsApproval(t *testing.T) {
 		BaseURL: server.URL,
 	}
 
-	// Capture stderr to verify skip message
-	oldStderr := os.Stderr
-	r, w, _ := os.Pipe()
-	os.Stderr = w
-
 	jobsChan := make(chan JobQueueInfo, 10)
 	err := processProject(context.Background(), processProjectConfig{
 		client:   client,
@@ -1245,13 +1276,6 @@ func TestProcessProject_TableSkipsApproval(t *testing.T) {
 		cutoff:   time.Now().AddDate(0, -1, 0),
 		jobsChan: jobsChan,
 	})
-
-	w.Close()
-	os.Stderr = oldStderr
-
-	var stderrBuf bytes.Buffer
-	stderrBuf.ReadFrom(r)
-
 	if err != nil {
 		t.Fatalf("processProject: %v", err)
 	}
@@ -1262,16 +1286,46 @@ func TestProcessProject_TableSkipsApproval(t *testing.T) {
 		jobs = append(jobs, job)
 	}
 
-	// Only build job should be in jobsChan (approval skipped)
-	if len(jobs) != 1 {
-		t.Fatalf("got %d jobs, want 1 (approval should be skipped)", len(jobs))
-	}
-	if jobs[0].JobName != "build-job" {
-		t.Errorf("job name = %q, want %q", jobs[0].JobName, "build-job")
+	// Both build and approval jobs should be in jobsChan
+	if len(jobs) != 2 {
+		t.Fatalf("got %d jobs, want 2 (build + approval)", len(jobs))
 	}
 
-	// Stderr should contain skip message for approval job
-	if !strings.Contains(stderrBuf.String(), "Skipping job with number 0") {
-		t.Errorf("stderr should contain skip message, got %q", stderrBuf.String())
+	// Find approval and build jobs
+	var approvalJob, buildJob *JobQueueInfo
+	for i := range jobs {
+		switch jobs[i].Type {
+		case "approval":
+			approvalJob = &jobs[i]
+		case "build":
+			buildJob = &jobs[i]
+		}
+	}
+
+	if buildJob == nil {
+		t.Fatal("build job not found")
+	}
+	if buildJob.JobName != "build-job" {
+		t.Errorf("build job name = %q, want %q", buildJob.JobName, "build-job")
+	}
+	if buildJob.QueueTime != 5000 {
+		t.Errorf("build job queue_time = %d, want 5000", buildJob.QueueTime)
+	}
+
+	if approvalJob == nil {
+		t.Fatal("approval job not found")
+	}
+	if approvalJob.JobName != "hold-for-deploy" {
+		t.Errorf("approval job name = %q, want %q", approvalJob.JobName, "hold-for-deploy")
+	}
+	if approvalJob.ApprovedBy != "user-1" {
+		t.Errorf("approval job approved_by = %q, want %q", approvalJob.ApprovedBy, "user-1")
+	}
+	// Approval job should have zero-value detail fields
+	if approvalJob.QueueTime != 0 {
+		t.Errorf("approval job queue_time = %d, want 0", approvalJob.QueueTime)
+	}
+	if approvalJob.WebURL != "" {
+		t.Errorf("approval job web_url = %q, want empty", approvalJob.WebURL)
 	}
 }
