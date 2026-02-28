@@ -32,7 +32,7 @@ type JobQueueInfo struct {
 	StartedAt    time.Time     `json:"started_at"`
 	StoppedAt    time.Time     `json:"stopped_at"`
 	Duration     int           `json:"duration"`
-	QueueTime    time.Duration `json:"queue_time"`
+	QueueTime    int64         `json:"queue_time"`
 	WorkflowName string        `json:"workflow_name"`
 	WorkflowID   string        `json:"workflow_id"`
 	PipelineID   string        `json:"pipeline_id"`
@@ -336,7 +336,7 @@ func main() {
 							job.StartedAt.Format(time.RFC3339),
 							job.StoppedAt.Format(time.RFC3339),
 							job.Duration,
-							int64(job.QueueTime.Seconds()),
+							job.QueueTime,
 						)
 					}
 				}
@@ -467,7 +467,7 @@ func main() {
 										StartedAt:    startedAt,
 										StoppedAt:    stoppedAt,
 										Duration:     jobDetails.Duration,
-										QueueTime:    startedAt.Sub(createdAt),
+										QueueTime:    startedAt.Sub(createdAt).Milliseconds(),
 										WorkflowName: workflow.Name,
 										WorkflowID:   workflow.ID,
 										PipelineID:   pipeline.ID,
