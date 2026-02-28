@@ -159,20 +159,35 @@ type WorkflowResponse struct {
 }
 
 type JobQueueInfo struct {
-	Repository   string    `json:"repository"`
-	JobName      string    `json:"job_name"`
-	JobNumber    int       `json:"job_number"`
-	JobID        string    `json:"job_id"`
-	Status       string    `json:"status"`
-	CreatedAt    time.Time `json:"created_at"`
-	QueuedAt     time.Time `json:"queued_at"`
-	StartedAt    time.Time `json:"started_at"`
-	StoppedAt    time.Time `json:"stopped_at"`
-	Duration     int       `json:"duration"`
-	QueueTime    int64     `json:"queue_time"`
-	WorkflowName string    `json:"workflow_name"`
-	WorkflowID   string    `json:"workflow_id"`
-	PipelineID   string    `json:"pipeline_id"`
+	Repository            string    `json:"repository"`
+	JobName               string    `json:"job_name"`
+	JobNumber             int       `json:"job_number"`
+	JobID                 string    `json:"job_id"`
+	Type                  string    `json:"type"`
+	Status                string    `json:"status"`
+	CreatedAt             time.Time `json:"created_at"`
+	QueuedAt              time.Time `json:"queued_at"`
+	StartedAt             time.Time `json:"started_at"`
+	StoppedAt             time.Time `json:"stopped_at"`
+	Duration              int       `json:"duration"`
+	QueueTime             int64     `json:"queue_time"`
+	WorkflowName          string    `json:"workflow_name"`
+	WorkflowID            string    `json:"workflow_id"`
+	PipelineID            string    `json:"pipeline_id"`
+	ProjectSlug           string    `json:"project_slug"`
+	CanceledBy            string    `json:"canceled_by"`
+	ApprovedBy            string    `json:"approved_by"`
+	ApprovalRequestID     string    `json:"approval_request_id"`
+	WebURL                string    `json:"web_url"`
+	Parallelism           int       `json:"parallelism"`
+	ExecutorResourceClass string    `json:"executor_resource_class"`
+	ExecutorType          string    `json:"executor_type"`
+	OrganizationName      string    `json:"organization_name"`
+	ProjectID             string    `json:"project_id"`
+	ProjectName           string    `json:"project_name"`
+	ProjectExternalURL    string    `json:"project_external_url"`
+	LatestWorkflowID      string    `json:"latest_workflow_id"`
+	LatestWorkflowName    string    `json:"latest_workflow_name"`
 }
 
 // --- CircleCI Client ---
@@ -812,10 +827,28 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 							if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, nil, nil); err != nil {
 								fmt.Fprintf(os.Stderr, "Warning: failed to insert approval job %s: %v\n", job.ID, err)
 							}
-							hasProcessedPipeline = true
-						} else if !cfg.silent {
-							fmt.Fprintf(os.Stderr, "Skipping job with number 0 (Workflow: https://circleci.com/workflow-run/%s)\n", workflow.ID)
 						}
+						if cfg.jobsChan != nil {
+							info := JobQueueInfo{
+								JobID:             job.ID,
+								JobName:           job.Name,
+								Type:              job.Type,
+								Status:            job.Status,
+								ProjectSlug:       job.ProjectSlug,
+								CanceledBy:        job.CanceledBy,
+								ApprovedBy:        job.ApprovedBy,
+								ApprovalRequestID: job.ApprovalRequestID,
+								WorkflowName:      workflow.Name,
+								WorkflowID:        workflow.ID,
+								PipelineID:        pipeline.ID,
+							}
+							select {
+							case <-ctx.Done():
+								return ctx.Err()
+							case cfg.jobsChan <- info:
+							}
+						}
+						hasProcessedPipeline = true
 						continue
 					}
 
@@ -853,20 +886,35 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						stoppedAt, _ := time.Parse(time.RFC3339, jobDetails.StoppedAt)
 
 						info := JobQueueInfo{
-							Repository:   jobDetails.Project.Slug,
-							JobName:      jobDetails.Name,
-							JobNumber:    jobDetails.Number,
-							JobID:        job.ID,
-							Status:       job.Status,
-							CreatedAt:    createdAt,
-							QueuedAt:     queuedAt,
-							StartedAt:    startedAt,
-							StoppedAt:    stoppedAt,
-							Duration:     jobDetails.Duration,
-							QueueTime:    startedAt.Sub(createdAt).Milliseconds(),
-							WorkflowName: workflow.Name,
-							WorkflowID:   workflow.ID,
-							PipelineID:   pipeline.ID,
+							Repository:            jobDetails.Project.Slug,
+							JobName:               jobDetails.Name,
+							JobNumber:             jobDetails.Number,
+							JobID:                 job.ID,
+							Type:                  job.Type,
+							Status:                job.Status,
+							CreatedAt:             createdAt,
+							QueuedAt:              queuedAt,
+							StartedAt:             startedAt,
+							StoppedAt:             stoppedAt,
+							Duration:              jobDetails.Duration,
+							QueueTime:             startedAt.Sub(createdAt).Milliseconds(),
+							WorkflowName:          workflow.Name,
+							WorkflowID:            workflow.ID,
+							PipelineID:            pipeline.ID,
+							ProjectSlug:           job.ProjectSlug,
+							CanceledBy:            job.CanceledBy,
+							ApprovedBy:            job.ApprovedBy,
+							ApprovalRequestID:     job.ApprovalRequestID,
+							WebURL:                jobDetails.WebURL,
+							Parallelism:           jobDetails.Parallelism,
+							ExecutorResourceClass: jobDetails.Executor.ResourceClass,
+							ExecutorType:          jobDetails.Executor.Type,
+							OrganizationName:      jobDetails.Organization.Name,
+							ProjectID:             jobDetails.Project.ID,
+							ProjectName:           jobDetails.Project.Name,
+							ProjectExternalURL:    jobDetails.Project.ExternalURL,
+							LatestWorkflowID:      jobDetails.LatestWorkflow.ID,
+							LatestWorkflowName:    jobDetails.LatestWorkflow.Name,
 						}
 
 						select {
@@ -994,10 +1042,10 @@ func newApp() *cli.App {
 							json.NewEncoder(os.Stdout).Encode(job)
 						}
 					} else {
-						fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tStatus\tCreated At\tQueued At\tStarted At\tStopped At\tDuration\tQueue Time")
-						fmt.Println("---------\t--------\t-----------\t-----------\t---\t-------\t------\t------\t----------\t---------\t----------\t----------\t--------\t----------")
+						fmt.Println("Repository\tWorkflow\tWorkflow ID\tPipeline ID\tJob\tJob ID\tNumber\tType\tStatus\tCreated At\tQueued At\tStarted At\tStopped At\tDuration\tQueue Time\tProject Slug\tCanceled By\tApproved By\tApproval Request ID\tWeb URL\tParallelism\tExecutor Resource Class\tExecutor Type\tOrganization\tProject ID\tProject Name\tProject External URL\tLatest Workflow ID\tLatest Workflow Name")
+						fmt.Println("---------\t--------\t-----------\t-----------\t---\t------\t------\t----\t------\t----------\t---------\t----------\t----------\t--------\t----------\t------------\t-----------\t-----------\t-------------------\t-------\t-----------\t----------------------\t-------------\t------------\t----------\t------------\t--------------------\t------------------\t--------------------")
 						for job := range jobsChan {
-							fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%d\n",
+							fmt.Printf("%s\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%d\t%d\t%s\t%s\t%s\t%s\t%s\t%d\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n",
 								job.Repository,
 								job.WorkflowName,
 								job.WorkflowID,
@@ -1005,6 +1053,7 @@ func newApp() *cli.App {
 								job.JobName,
 								job.JobID,
 								job.JobNumber,
+								job.Type,
 								job.Status,
 								job.CreatedAt.Format(time.RFC3339),
 								job.QueuedAt.Format(time.RFC3339),
@@ -1012,6 +1061,20 @@ func newApp() *cli.App {
 								job.StoppedAt.Format(time.RFC3339),
 								job.Duration,
 								job.QueueTime,
+								job.ProjectSlug,
+								job.CanceledBy,
+								job.ApprovedBy,
+								job.ApprovalRequestID,
+								job.WebURL,
+								job.Parallelism,
+								job.ExecutorResourceClass,
+								job.ExecutorType,
+								job.OrganizationName,
+								job.ProjectID,
+								job.ProjectName,
+								job.ProjectExternalURL,
+								job.LatestWorkflowID,
+								job.LatestWorkflowName,
 							)
 						}
 					}
