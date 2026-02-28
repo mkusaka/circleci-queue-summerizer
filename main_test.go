@@ -10,6 +10,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -1328,4 +1329,462 @@ func TestProcessProject_IncludesApproval(t *testing.T) {
 	if approvalJob.WebURL != "" {
 		t.Errorf("approval job web_url = %q, want empty", approvalJob.WebURL)
 	}
+}
+
+// --- Lookup method unit tests ---
+
+func TestIsPipelineFullyProcessed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	w, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer w.Close()
+
+	// No workflows → not fully processed
+	ok, err := w.IsPipelineFullyProcessed("pipe-1")
+	if err != nil {
+		t.Fatalf("IsPipelineFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when no workflows exist")
+	}
+
+	// Add terminal workflow without jobs → not fully processed
+	w.InsertWorkflow(WorkflowItem{ID: "wf-1", PipelineID: "pipe-1", Name: "build", Status: "success"})
+	ok, err = w.IsPipelineFullyProcessed("pipe-1")
+	if err != nil {
+		t.Fatalf("IsPipelineFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when workflow has no jobs")
+	}
+
+	// Add a job → now fully processed
+	detail := &JobResponse{CreatedAt: "2026-01-15T10:00:00Z", StartedAt: "2026-01-15T10:00:05Z"}
+	ms := int64(5000)
+	w.InsertJob(WorkflowJobItem{ID: "job-1", Name: "test", Type: "build", Status: "success", JobNumber: 1}, "wf-1", detail, &ms)
+	ok, err = w.IsPipelineFullyProcessed("pipe-1")
+	if err != nil {
+		t.Fatalf("IsPipelineFullyProcessed: %v", err)
+	}
+	if !ok {
+		t.Error("expected true when all workflows terminal and have jobs")
+	}
+
+	// Add non-terminal workflow → not fully processed
+	w.InsertWorkflow(WorkflowItem{ID: "wf-2", PipelineID: "pipe-1", Name: "deploy", Status: "running"})
+	ok, err = w.IsPipelineFullyProcessed("pipe-1")
+	if err != nil {
+		t.Fatalf("IsPipelineFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when one workflow is non-terminal")
+	}
+}
+
+func TestIsWorkflowFullyProcessed(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	w, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer w.Close()
+
+	// Not exists → false
+	ok, err := w.IsWorkflowFullyProcessed("wf-1")
+	if err != nil {
+		t.Fatalf("IsWorkflowFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when workflow does not exist")
+	}
+
+	// Terminal but no jobs → false
+	w.InsertWorkflow(WorkflowItem{ID: "wf-1", PipelineID: "pipe-1", Name: "build", Status: "success"})
+	ok, err = w.IsWorkflowFullyProcessed("wf-1")
+	if err != nil {
+		t.Fatalf("IsWorkflowFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when terminal but no jobs")
+	}
+
+	// Terminal with jobs → true
+	w.InsertJob(WorkflowJobItem{ID: "job-1", Name: "test", Status: "success", JobNumber: 1}, "wf-1", &JobResponse{CreatedAt: "2026-01-15T10:00:00Z", StartedAt: "2026-01-15T10:00:05Z"}, nil)
+	ok, err = w.IsWorkflowFullyProcessed("wf-1")
+	if err != nil {
+		t.Fatalf("IsWorkflowFullyProcessed: %v", err)
+	}
+	if !ok {
+		t.Error("expected true when terminal with jobs")
+	}
+
+	// Non-terminal with jobs → false
+	w.InsertWorkflow(WorkflowItem{ID: "wf-2", PipelineID: "pipe-1", Name: "deploy", Status: "running"})
+	w.InsertJob(WorkflowJobItem{ID: "job-2", Name: "deploy", Status: "running", JobNumber: 2}, "wf-2", &JobResponse{CreatedAt: "2026-01-15T10:00:00Z", StartedAt: "2026-01-15T10:00:05Z"}, nil)
+	ok, err = w.IsWorkflowFullyProcessed("wf-2")
+	if err != nil {
+		t.Fatalf("IsWorkflowFullyProcessed: %v", err)
+	}
+	if ok {
+		t.Error("expected false when workflow is non-terminal")
+	}
+}
+
+func TestIsJobComplete(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	w, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer w.Close()
+
+	// Not exists → false
+	ok, err := w.IsJobComplete("job-1")
+	if err != nil {
+		t.Fatalf("IsJobComplete: %v", err)
+	}
+	if ok {
+		t.Error("expected false when job does not exist")
+	}
+
+	// Terminal with details → true
+	detail := &JobResponse{CreatedAt: "2026-01-15T10:00:00Z", StartedAt: "2026-01-15T10:00:05Z"}
+	w.InsertJob(WorkflowJobItem{ID: "job-1", Name: "test", Status: "success", JobNumber: 1}, "wf-1", detail, nil)
+	ok, err = w.IsJobComplete("job-1")
+	if err != nil {
+		t.Fatalf("IsJobComplete: %v", err)
+	}
+	if !ok {
+		t.Error("expected true when terminal with details")
+	}
+
+	// Terminal without details (approval job) → false
+	w.InsertJob(WorkflowJobItem{ID: "approval-1", Name: "hold", Type: "approval", Status: "success", JobNumber: 0}, "wf-1", nil, nil)
+	ok, err = w.IsJobComplete("approval-1")
+	if err != nil {
+		t.Fatalf("IsJobComplete: %v", err)
+	}
+	if ok {
+		t.Error("expected false when terminal but no details (approval job)")
+	}
+
+	// Non-terminal with details → false
+	w.InsertJob(WorkflowJobItem{ID: "job-2", Name: "build", Status: "running", JobNumber: 2}, "wf-1",
+		&JobResponse{CreatedAt: "2026-01-15T10:00:00Z", StartedAt: "2026-01-15T10:00:05Z"}, nil)
+	ok, err = w.IsJobComplete("job-2")
+	if err != nil {
+		t.Fatalf("IsJobComplete: %v", err)
+	}
+	if ok {
+		t.Error("expected false when non-terminal")
+	}
+}
+
+// --- Integration test: API call skipping ---
+
+func TestProcessProject_SQLite_SkipsRedundantAPICalls(t *testing.T) {
+	var mu sync.Mutex
+	callCounts := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		mu.Lock()
+		switch {
+		case strings.HasSuffix(path, "/pipeline"):
+			callCounts["getPipelines"]++
+		case strings.Contains(path, "/job/"):
+			callCounts["getJobDetails"]++
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			callCounts["getPipelineWorkflows"]++
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			callCounts["getWorkflowJobs"]++
+		case strings.HasPrefix(path, "/api/v2/project/"):
+			callCounts["getProject"]++
+		}
+		mu.Unlock()
+
+		switch {
+		case strings.HasSuffix(path, "/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{{
+					ID:          "pipe-1",
+					ProjectSlug: "gh/org/repo",
+					Number:      1,
+					State:       "created",
+					CreatedAt:   time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.Contains(path, "/job/"):
+			jr := JobResponse{
+				CreatedAt: "2026-01-15T10:00:00Z",
+				QueuedAt:  "2026-01-15T10:00:01Z",
+				StartedAt: "2026-01-15T10:00:05Z",
+				StoppedAt: "2026-01-15T10:01:00Z",
+				Duration:  55000,
+				Name:      "test-job",
+				Number:    1,
+				WebURL:    "https://circleci.com/jobs/1",
+				Status:    "success",
+			}
+			jr.Executor.ResourceClass = "medium"
+			jr.Executor.Type = "docker"
+			jr.Organization.Name = "org"
+			jr.Project.ID = "proj-1"
+			jr.Pipeline.ID = "pipe-1"
+			jr.LatestWorkflow.ID = "wf-1"
+			json.NewEncoder(w).Encode(jr)
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{{
+					ID:         "wf-1",
+					PipelineID: "pipe-1",
+					Name:       "build",
+					Status:     "success",
+					CreatedAt:  time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{{
+					ID:          "job-1",
+					Name:        "test-job",
+					Type:        "build",
+					Status:      "success",
+					JobNumber:   1,
+					ProjectSlug: "gh/org/repo",
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/project/"):
+			json.NewEncoder(w).Encode(ProjectResponse{
+				ID:   "proj-1",
+				Slug: "gh/org/repo",
+				Name: "repo",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	cfg := processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		silent:       true,
+	}
+
+	// First run: all API calls should happen
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (1st): %v", err)
+	}
+
+	mu.Lock()
+	firstRun := map[string]int{}
+	for k, v := range callCounts {
+		firstRun[k] = v
+	}
+	mu.Unlock()
+
+	if firstRun["getPipelines"] != 1 {
+		t.Errorf("1st run: getPipelines = %d, want 1", firstRun["getPipelines"])
+	}
+	if firstRun["getPipelineWorkflows"] != 1 {
+		t.Errorf("1st run: getPipelineWorkflows = %d, want 1", firstRun["getPipelineWorkflows"])
+	}
+	if firstRun["getWorkflowJobs"] != 1 {
+		t.Errorf("1st run: getWorkflowJobs = %d, want 1", firstRun["getWorkflowJobs"])
+	}
+	if firstRun["getJobDetails"] != 1 {
+		t.Errorf("1st run: getJobDetails = %d, want 1", firstRun["getJobDetails"])
+	}
+
+	// Reset counts
+	mu.Lock()
+	for k := range callCounts {
+		callCounts[k] = 0
+	}
+	mu.Unlock()
+
+	// Second run: pipeline-level skip should prevent downstream calls
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (2nd): %v", err)
+	}
+
+	mu.Lock()
+	secondRun := map[string]int{}
+	for k, v := range callCounts {
+		secondRun[k] = v
+	}
+	mu.Unlock()
+
+	if secondRun["getProject"] != 1 {
+		t.Errorf("2nd run: getProject = %d, want 1 (always called)", secondRun["getProject"])
+	}
+	if secondRun["getPipelines"] != 1 {
+		t.Errorf("2nd run: getPipelines = %d, want 1 (always called)", secondRun["getPipelines"])
+	}
+	if secondRun["getPipelineWorkflows"] != 0 {
+		t.Errorf("2nd run: getPipelineWorkflows = %d, want 0 (should be skipped)", secondRun["getPipelineWorkflows"])
+	}
+	if secondRun["getWorkflowJobs"] != 0 {
+		t.Errorf("2nd run: getWorkflowJobs = %d, want 0 (should be skipped)", secondRun["getWorkflowJobs"])
+	}
+	if secondRun["getJobDetails"] != 0 {
+		t.Errorf("2nd run: getJobDetails = %d, want 0 (should be skipped)", secondRun["getJobDetails"])
+	}
+
+	// Verify data is still correct in DB
+	var jobCount int
+	sw.db.QueryRow("SELECT COUNT(*) FROM jobs").Scan(&jobCount)
+	if jobCount != 1 {
+		t.Errorf("jobs count = %d, want 1", jobCount)
+	}
+}
+
+func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
+	runCount := 0
+	var mu sync.Mutex
+	callCounts := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		mu.Lock()
+		switch {
+		case strings.Contains(path, "/job/"):
+			callCounts["getJobDetails"]++
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			callCounts["getPipelineWorkflows"]++
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			callCounts["getWorkflowJobs"]++
+		}
+		currentRun := runCount
+		mu.Unlock()
+
+		switch {
+		case strings.HasSuffix(path, "/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{{
+					ID:        "pipe-1",
+					Number:    1,
+					State:     "created",
+					CreatedAt: time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.Contains(path, "/job/"):
+			json.NewEncoder(w).Encode(JobResponse{
+				CreatedAt: "2026-01-15T10:00:00Z",
+				QueuedAt:  "2026-01-15T10:00:01Z",
+				StartedAt: "2026-01-15T10:00:05Z",
+				StoppedAt: "2026-01-15T10:01:00Z",
+				Duration:  55000,
+				Name:      "test-job",
+				Number:    1,
+				Status:    "success",
+			})
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			// First run: workflow is "running"; second run: "success"
+			status := "running"
+			if currentRun > 0 {
+				status = "success"
+			}
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{{
+					ID:         "wf-1",
+					PipelineID: "pipe-1",
+					Name:       "build",
+					Status:     status,
+					CreatedAt:  time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{{
+					ID:          "job-1",
+					Name:        "test-job",
+					Type:        "build",
+					Status:      "success",
+					JobNumber:   1,
+					ProjectSlug: "gh/org/repo",
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/project/"):
+			json.NewEncoder(w).Encode(ProjectResponse{ID: "proj-1", Slug: "gh/org/repo", Name: "repo"})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{Token: "test-token", Client: server.Client(), BaseURL: server.URL}
+	cfg := processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		silent:       true,
+	}
+
+	// First run: workflow is "running" → pipeline NOT fully processed
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (1st): %v", err)
+	}
+
+	mu.Lock()
+	if callCounts["getJobDetails"] != 1 {
+		t.Errorf("1st run: getJobDetails = %d, want 1", callCounts["getJobDetails"])
+	}
+	// Reset
+	for k := range callCounts {
+		callCounts[k] = 0
+	}
+	runCount = 1
+	mu.Unlock()
+
+	// Second run: workflow "running" in DB (was inserted on first run), but API returns "success".
+	// Pipeline is NOT fully processed because DB has "running" workflow.
+	// GetPipelineWorkflows IS called, but then the workflow is upserted to "success" + has jobs → workflow-level skip for GetWorkflowJobs
+	// Actually: we insert the workflow as "success" from the API, then check IsWorkflowFullyProcessed which checks DB status.
+	// Since we just upserted to "success" and job exists → workflow-level skip triggers, so GetWorkflowJobs is skipped.
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject (2nd): %v", err)
+	}
+
+	mu.Lock()
+	// Pipeline-level skip won't trigger (DB had "running" workflow before this run)
+	// But workflow-level skip triggers after upsert (now "success" + has jobs)
+	if callCounts["getPipelineWorkflows"] != 1 {
+		t.Errorf("2nd run: getPipelineWorkflows = %d, want 1 (pipeline not fully processed in DB)", callCounts["getPipelineWorkflows"])
+	}
+	if callCounts["getWorkflowJobs"] != 0 {
+		t.Errorf("2nd run: getWorkflowJobs = %d, want 0 (workflow-level skip after upsert)", callCounts["getWorkflowJobs"])
+	}
+	if callCounts["getJobDetails"] != 0 {
+		t.Errorf("2nd run: getJobDetails = %d, want 0 (should be skipped)", callCounts["getJobDetails"])
+	}
+	mu.Unlock()
 }
