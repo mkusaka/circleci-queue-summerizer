@@ -178,8 +178,16 @@ type JobQueueInfo struct {
 // --- CircleCI Client ---
 
 type CircleCIClient struct {
-	Token  string
-	Client *http.Client
+	Token   string
+	Client  *http.Client
+	BaseURL string // default: https://circleci.com
+}
+
+func (c *CircleCIClient) baseURL() string {
+	if c.BaseURL != "" {
+		return c.BaseURL
+	}
+	return "https://circleci.com"
 }
 
 const (
@@ -229,7 +237,7 @@ func (c *CircleCIClient) doWithRetry(req *http.Request) (*http.Response, error) 
 }
 
 func (c *CircleCIClient) GetJobDetails(ctx context.Context, projectSlug string, jobNumber int) (*JobResponse, error) {
-	url := fmt.Sprintf("https://circleci.com/api/v2/project/%s/job/%d", projectSlug, jobNumber)
+	url := fmt.Sprintf("%s/api/v2/project/%s/job/%d", c.baseURL(), projectSlug, jobNumber)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -263,7 +271,7 @@ func (c *CircleCIClient) GetJobDetails(ctx context.Context, projectSlug string, 
 }
 
 func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (*WorkflowResponse, error) {
-	url := fmt.Sprintf("https://circleci.com/api/v2/insights/%s/workflows/summary", projectSlug)
+	url := fmt.Sprintf("%s/api/v2/insights/%s/workflows/summary", c.baseURL(), projectSlug)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -285,7 +293,7 @@ func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (
 }
 
 func (c *CircleCIClient) GetWorkflowJobs(ctx context.Context, workflowID string, pageToken string) (*WorkflowJobsResponse, error) {
-	baseURL := fmt.Sprintf("https://circleci.com/api/v2/workflow/%s/job", workflowID)
+	baseURL := fmt.Sprintf("%s/api/v2/workflow/%s/job", c.baseURL(), workflowID)
 	url := baseURL
 	if pageToken != "" {
 		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
@@ -322,7 +330,7 @@ func (c *CircleCIClient) GetWorkflowJobs(ctx context.Context, workflowID string,
 }
 
 func (c *CircleCIClient) GetPipelines(ctx context.Context, projectSlug string, pageToken string) (*PipelineResponse, error) {
-	baseURL := fmt.Sprintf("https://circleci.com/api/v2/project/%s/pipeline", projectSlug)
+	baseURL := fmt.Sprintf("%s/api/v2/project/%s/pipeline", c.baseURL(), projectSlug)
 	url := baseURL
 	if pageToken != "" {
 		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
@@ -354,7 +362,7 @@ func (c *CircleCIClient) GetPipelines(ctx context.Context, projectSlug string, p
 }
 
 func (c *CircleCIClient) GetPipelineWorkflows(ctx context.Context, pipelineID string, pageToken string) (*PipelineWorkflowResponse, error) {
-	baseURL := fmt.Sprintf("https://circleci.com/api/v2/pipeline/%s/workflow", pipelineID)
+	baseURL := fmt.Sprintf("%s/api/v2/pipeline/%s/workflow", c.baseURL(), pipelineID)
 	url := baseURL
 	if pageToken != "" {
 		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
@@ -386,7 +394,7 @@ func (c *CircleCIClient) GetPipelineWorkflows(ctx context.Context, pipelineID st
 }
 
 func (c *CircleCIClient) GetProject(ctx context.Context, projectSlug string) (*ProjectResponse, error) {
-	url := fmt.Sprintf("https://circleci.com/api/v2/project/%s", projectSlug)
+	url := fmt.Sprintf("%s/api/v2/project/%s", c.baseURL(), projectSlug)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -413,7 +421,7 @@ func (c *CircleCIClient) GetProject(ctx context.Context, projectSlug string) (*P
 }
 
 func (c *CircleCIClient) GetOrgProjects(ctx context.Context, orgSlug string) ([]string, error) {
-	url := fmt.Sprintf("https://circleci.com/api/v2/insights/%s/summary", orgSlug)
+	url := fmt.Sprintf("%s/api/v2/insights/%s/summary", c.baseURL(), orgSlug)
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return nil, err
@@ -891,8 +899,8 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 // --- Main ---
 
-func main() {
-	app := &cli.App{
+func newApp() *cli.App {
+	return &cli.App{
 		Name:  "circleci-queue-time",
 		Usage: "Get queue times for CircleCI jobs",
 		Flags: []cli.Flag{
@@ -1056,8 +1064,10 @@ func main() {
 			return nil
 		},
 	}
+}
 
-	if err := app.Run(os.Args); err != nil {
+func main() {
+	if err := newApp().Run(os.Args); err != nil {
 		log.Fatal(err)
 	}
 }
