@@ -218,6 +218,7 @@ type CircleCIClient struct {
 	Token   string
 	Client  *http.Client
 	BaseURL string // default: https://circleci.com
+	Warnf   func(format string, args ...any)
 }
 
 func (c *CircleCIClient) baseURL() string {
@@ -261,7 +262,11 @@ func (c *CircleCIClient) doWithRetry(req *http.Request) (*http.Response, error) 
 
 		resp.Body.Close()
 
-		fmt.Fprintf(os.Stderr, "Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
+		if c.Warnf != nil {
+			c.Warnf("Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
+		} else {
+			fmt.Fprintf(os.Stderr, "Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
+		}
 
 		select {
 		case <-req.Context().Done():
@@ -802,6 +807,38 @@ func expandProjectSlugs(ctx context.Context, client *CircleCIClient, projects []
 	return expanded, nil
 }
 
+// --- Warning Buffer ---
+
+// warningBuffer collects warning messages when the spinner is active,
+// then flushes them after the spinner stops so they don't interleave.
+type warningBuffer struct {
+	mu       sync.Mutex
+	warnings []string
+	buffered bool // true = collect into buffer; false = write to stderr immediately
+}
+
+func (wb *warningBuffer) warnf(format string, args ...any) {
+	msg := fmt.Sprintf(format, args...)
+	if wb.buffered {
+		wb.mu.Lock()
+		wb.warnings = append(wb.warnings, msg)
+		wb.mu.Unlock()
+	} else {
+		fmt.Fprint(os.Stderr, msg)
+	}
+}
+
+func (wb *warningBuffer) flush() {
+	wb.mu.Lock()
+	defer wb.mu.Unlock()
+	if len(wb.warnings) > 0 {
+		fmt.Fprintf(os.Stderr, "\n⚠️  %d warning(s) during processing:\n", len(wb.warnings))
+		for _, w := range wb.warnings {
+			fmt.Fprint(os.Stderr, w)
+		}
+	}
+}
+
 // --- Processing Stats ---
 
 type processingStats struct {
@@ -870,18 +907,25 @@ type processProjectConfig struct {
 	jobsChan     chan<- JobQueueInfo
 	stats        *processingStats
 	onProgress   func()
+	warnf        func(format string, args ...any)
 }
 
 func processProject(ctx context.Context, cfg processProjectConfig) error {
+	if cfg.warnf == nil {
+		cfg.warnf = func(format string, args ...any) {
+			fmt.Fprintf(os.Stderr, format, args...)
+		}
+	}
+
 	slug := strings.Replace(cfg.slug, "github/", "gh/", 1)
 
 	if cfg.sqliteWriter != nil {
 		project, err := cfg.client.GetProject(ctx, slug)
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Warning: failed to get project info for %s: %v\n", slug, err)
+			cfg.warnf("Warning: failed to get project info for %s: %v\n", slug, err)
 		} else {
 			if err := cfg.sqliteWriter.InsertProject(project); err != nil {
-				fmt.Fprintf(os.Stderr, "Warning: failed to insert project %s: %v\n", slug, err)
+				cfg.warnf("Warning: failed to insert project %s: %v\n", slug, err)
 			}
 		}
 	}
@@ -921,12 +965,12 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 			if cfg.sqliteWriter != nil {
 				if err := cfg.sqliteWriter.InsertPipeline(pipeline); err != nil {
-					fmt.Fprintf(os.Stderr, "Warning: failed to insert pipeline %s: %v\n", pipeline.ID, err)
+					cfg.warnf("Warning: failed to insert pipeline %s: %v\n", pipeline.ID, err)
 				}
 
 				fullyProcessed, lookupErr := cfg.sqliteWriter.IsPipelineFullyProcessed(pipeline.ID)
 				if lookupErr != nil {
-					fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for pipeline %s: %v\n", pipeline.ID, lookupErr)
+					cfg.warnf("Warning: DB lookup failed for pipeline %s: %v\n", pipeline.ID, lookupErr)
 				} else if fullyProcessed {
 					if cfg.verbose {
 						fmt.Fprintf(os.Stderr, "Skipping pipeline %s (fully processed in DB)\n", pipeline.ID)
@@ -948,7 +992,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 			for {
 				workflows, err := cfg.client.GetPipelineWorkflows(ctx, pipeline.ID, wfPageToken)
 				if err != nil {
-					fmt.Fprintf(os.Stderr, "Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
+					cfg.warnf("Error getting workflows for pipeline %s: %v\n", pipeline.ID, err)
 					break
 				}
 				allWorkflows = append(allWorkflows, workflows.Items...)
@@ -969,12 +1013,12 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 				if cfg.sqliteWriter != nil {
 					if err := cfg.sqliteWriter.InsertWorkflow(workflow); err != nil {
-						fmt.Fprintf(os.Stderr, "Warning: failed to insert workflow %s: %v\n", workflow.ID, err)
+						cfg.warnf("Warning: failed to insert workflow %s: %v\n", workflow.ID, err)
 					}
 
 					wfProcessed, lookupErr := cfg.sqliteWriter.IsWorkflowFullyProcessed(workflow.ID)
 					if lookupErr != nil {
-						fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for workflow %s: %v\n", workflow.ID, lookupErr)
+						cfg.warnf("Warning: DB lookup failed for workflow %s: %v\n", workflow.ID, lookupErr)
 					} else if wfProcessed {
 						if cfg.verbose {
 							fmt.Fprintf(os.Stderr, "Skipping workflow %s/%s (fully processed in DB)\n", workflow.Name, workflow.ID)
@@ -996,7 +1040,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 				for {
 					jobs, err := cfg.client.GetWorkflowJobs(ctx, workflow.ID, jobPageToken)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "⚠️  Workflow %s (%s): %v\n", workflow.Name, workflow.ID, err)
+						cfg.warnf("⚠️  Workflow %s (%s): %v\n", workflow.Name, workflow.ID, err)
 						break
 					}
 					allJobs = append(allJobs, jobs.Items...)
@@ -1016,7 +1060,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 					if job.JobNumber == 0 {
 						if cfg.sqliteWriter != nil {
 							if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, nil, nil); err != nil {
-								fmt.Fprintf(os.Stderr, "Warning: failed to insert approval job %s: %v\n", job.ID, err)
+								cfg.warnf("Warning: failed to insert approval job %s: %v\n", job.ID, err)
 							}
 						}
 						if cfg.jobsChan != nil {
@@ -1052,7 +1096,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 					if cfg.sqliteWriter != nil {
 						jobComplete, lookupErr := cfg.sqliteWriter.IsJobComplete(job.ID)
 						if lookupErr != nil {
-							fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for job %s: %v\n", job.ID, lookupErr)
+							cfg.warnf("Warning: DB lookup failed for job %s: %v\n", job.ID, lookupErr)
 						} else if jobComplete {
 							if cfg.verbose {
 								fmt.Fprintf(os.Stderr, "Skipping job %s/%d (complete in DB)\n", job.Name, job.JobNumber)
@@ -1070,7 +1114,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 					jobDetails, err := cfg.client.GetJobDetails(ctx, slug, job.JobNumber)
 					if err != nil {
-						fmt.Fprintf(os.Stderr, "⚠️  Job %d in workflow %s: %v\n", job.JobNumber, workflow.Name, err)
+						cfg.warnf("⚠️  Job %d in workflow %s: %v\n", job.JobNumber, workflow.Name, err)
 						continue
 					}
 
@@ -1083,7 +1127,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 							queueTimeMs = &ms
 						}
 						if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, jobDetails, queueTimeMs); err != nil {
-							fmt.Fprintf(os.Stderr, "Warning: failed to insert job %s: %v\n", job.ID, err)
+							cfg.warnf("Warning: failed to insert job %s: %v\n", job.ID, err)
 						}
 						if cfg.stats != nil {
 							cfg.stats.incJob(false)
@@ -1278,6 +1322,9 @@ func newApp() *cli.App {
 				sp.Start()
 			}
 
+			wb := &warningBuffer{buffered: sp != nil}
+			client.Warnf = wb.warnf
+
 			var onProgress func()
 			if sp != nil {
 				onProgress = func() {
@@ -1354,6 +1401,7 @@ func newApp() *cli.App {
 						jobsChan:     jobsChan,
 						stats:        stats,
 						onProgress:   onProgress,
+						warnf:        wb.warnf,
 					}); err != nil {
 						errChan <- fmt.Errorf("❌ %v", err)
 					}
@@ -1365,6 +1413,8 @@ func newApp() *cli.App {
 			if sp != nil {
 				sp.Stop()
 			}
+
+			wb.flush()
 
 			if jobsChan != nil {
 				close(jobsChan)
