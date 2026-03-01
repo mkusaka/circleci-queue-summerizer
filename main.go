@@ -502,6 +502,11 @@ func NewSQLiteWriter(dbPath string) (*SQLiteWriter, error) {
 		return nil, fmt.Errorf("failed to set WAL mode: %w", err)
 	}
 
+	if _, err := db.Exec("PRAGMA busy_timeout=5000"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to set busy_timeout: %w", err)
+	}
+
 	w := &SQLiteWriter{db: db}
 	if err := w.createTables(); err != nil {
 		db.Close()
