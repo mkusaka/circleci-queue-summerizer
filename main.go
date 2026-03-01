@@ -16,6 +16,8 @@ import (
 	"sync"
 	"time"
 
+	"github.com/briandowns/spinner"
+	"github.com/mattn/go-isatty"
 	"github.com/urfave/cli/v2"
 	_ "modernc.org/sqlite"
 )
@@ -795,6 +797,61 @@ func expandProjectSlugs(ctx context.Context, client *CircleCIClient, projects []
 	return expanded, nil
 }
 
+// --- Processing Stats ---
+
+type processingStats struct {
+	mu               sync.Mutex
+	pipelinesTotal   int
+	pipelinesSkipped int
+	workflowsTotal   int
+	workflowsSkipped int
+	jobsTotal        int
+	jobsSkipped      int
+}
+
+func (s *processingStats) incPipeline(skipped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.pipelinesTotal++
+	if skipped {
+		s.pipelinesSkipped++
+	}
+}
+
+func (s *processingStats) incWorkflow(skipped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.workflowsTotal++
+	if skipped {
+		s.workflowsSkipped++
+	}
+}
+
+func (s *processingStats) incJob(skipped bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.jobsTotal++
+	if skipped {
+		s.jobsSkipped++
+	}
+}
+
+func (s *processingStats) summary() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fmt.Sprintf("Processed %d pipelines (%d skipped), %d workflows (%d skipped), %d jobs (%d skipped)",
+		s.pipelinesTotal, s.pipelinesSkipped,
+		s.workflowsTotal, s.workflowsSkipped,
+		s.jobsTotal, s.jobsSkipped)
+}
+
+func (s *processingStats) spinnerSuffix() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return fmt.Sprintf(" %d pipelines, %d workflows, %d jobs processed...",
+		s.pipelinesTotal, s.workflowsTotal, s.jobsTotal)
+}
+
 // --- Process Project ---
 
 type processProjectConfig struct {
@@ -803,9 +860,11 @@ type processProjectConfig struct {
 	limit        int
 	monthsSet    bool
 	cutoff       time.Time
-	silent       bool
+	verbose      bool
 	sqliteWriter *SQLiteWriter
 	jobsChan     chan<- JobQueueInfo
+	stats        *processingStats
+	onProgress   func()
 }
 
 func processProject(ctx context.Context, cfg processProjectConfig) error {
@@ -864,8 +923,14 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 				if lookupErr != nil {
 					fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for pipeline %s: %v\n", pipeline.ID, lookupErr)
 				} else if fullyProcessed {
-					if !cfg.silent {
+					if cfg.verbose {
 						fmt.Fprintf(os.Stderr, "Skipping pipeline %s (fully processed in DB)\n", pipeline.ID)
+					}
+					if cfg.stats != nil {
+						cfg.stats.incPipeline(true)
+						if cfg.onProgress != nil {
+							cfg.onProgress()
+						}
 					}
 					count++
 					continue
@@ -906,8 +971,14 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 					if lookupErr != nil {
 						fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for workflow %s: %v\n", workflow.ID, lookupErr)
 					} else if wfProcessed {
-						if !cfg.silent {
+						if cfg.verbose {
 							fmt.Fprintf(os.Stderr, "Skipping workflow %s/%s (fully processed in DB)\n", workflow.Name, workflow.ID)
+						}
+						if cfg.stats != nil {
+							cfg.stats.incWorkflow(true)
+							if cfg.onProgress != nil {
+								cfg.onProgress()
+							}
 						}
 						hasProcessedPipeline = true
 						continue
@@ -963,6 +1034,12 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 							case cfg.jobsChan <- info:
 							}
 						}
+						if cfg.stats != nil {
+							cfg.stats.incJob(false)
+							if cfg.onProgress != nil {
+								cfg.onProgress()
+							}
+						}
 						hasProcessedPipeline = true
 						continue
 					}
@@ -972,8 +1049,14 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						if lookupErr != nil {
 							fmt.Fprintf(os.Stderr, "Warning: DB lookup failed for job %s: %v\n", job.ID, lookupErr)
 						} else if jobComplete {
-							if !cfg.silent {
+							if cfg.verbose {
 								fmt.Fprintf(os.Stderr, "Skipping job %s/%d (complete in DB)\n", job.Name, job.JobNumber)
+							}
+							if cfg.stats != nil {
+								cfg.stats.incJob(true)
+								if cfg.onProgress != nil {
+									cfg.onProgress()
+								}
 							}
 							hasProcessedPipeline = true
 							continue
@@ -996,6 +1079,12 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						}
 						if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, jobDetails, queueTimeMs); err != nil {
 							fmt.Fprintf(os.Stderr, "Warning: failed to insert job %s: %v\n", job.ID, err)
+						}
+						if cfg.stats != nil {
+							cfg.stats.incJob(false)
+							if cfg.onProgress != nil {
+								cfg.onProgress()
+							}
 						}
 						hasProcessedPipeline = true
 					} else {
@@ -1049,13 +1138,31 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						case <-ctx.Done():
 							return ctx.Err()
 						case cfg.jobsChan <- info:
+							if cfg.stats != nil {
+								cfg.stats.incJob(false)
+								if cfg.onProgress != nil {
+									cfg.onProgress()
+								}
+							}
 							hasProcessedPipeline = true
 						}
+					}
+				}
+				if cfg.stats != nil {
+					cfg.stats.incWorkflow(false)
+					if cfg.onProgress != nil {
+						cfg.onProgress()
 					}
 				}
 			}
 
 			if hasProcessedPipeline {
+				if cfg.stats != nil {
+					cfg.stats.incPipeline(false)
+					if cfg.onProgress != nil {
+						cfg.onProgress()
+					}
+				}
 				count++
 			}
 		}
@@ -1113,8 +1220,9 @@ func newApp() *cli.App {
 				Usage: "Number of months to look back",
 			},
 			&cli.BoolFlag{
-				Name:  "silent",
-				Usage: "Suppress all output except errors",
+				Name:    "verbose",
+				Aliases: []string{"v"},
+				Usage:   "Show detailed progress messages on stderr",
 			},
 		},
 		Action: func(c *cli.Context) error {
@@ -1155,16 +1263,30 @@ func newApp() *cli.App {
 				sqliteWriter = sw
 			}
 
+			verbose := c.Bool("verbose")
+			stats := &processingStats{}
+
+			var sp *spinner.Spinner
+			if format == "sqlite" && !verbose && isatty.IsTerminal(os.Stderr.Fd()) {
+				sp = spinner.New(spinner.CharSets[14], 100*time.Millisecond, spinner.WithWriter(os.Stderr))
+				sp.Suffix = " Processing..."
+				sp.Start()
+			}
+
+			var onProgress func()
+			if sp != nil {
+				onProgress = func() {
+					sp.Lock()
+					sp.Suffix = stats.spinnerSuffix()
+					sp.Unlock()
+				}
+			}
+
 			var jobsChan chan JobQueueInfo
 			var wg sync.WaitGroup
 			if format != "sqlite" {
 				jobsChan = make(chan JobQueueInfo)
 				wg.Go(func() {
-					if c.Bool("silent") {
-						for range jobsChan {
-						}
-						return
-					}
 					if format == "ndjson" {
 						for job := range jobsChan {
 							json.NewEncoder(os.Stdout).Encode(job)
@@ -1222,9 +1344,11 @@ func newApp() *cli.App {
 						limit:        limit,
 						monthsSet:    monthsSet,
 						cutoff:       cutoff,
-						silent:       c.Bool("silent"),
+						verbose:      verbose,
 						sqliteWriter: sqliteWriter,
 						jobsChan:     jobsChan,
+						stats:        stats,
+						onProgress:   onProgress,
 					}); err != nil {
 						errChan <- fmt.Errorf("❌ %v", err)
 					}
@@ -1232,6 +1356,11 @@ func newApp() *cli.App {
 			}
 
 			projectWg.Wait()
+
+			if sp != nil {
+				sp.Stop()
+			}
+
 			if jobsChan != nil {
 				close(jobsChan)
 			}
@@ -1243,6 +1372,8 @@ func newApp() *cli.App {
 			}
 
 			wg.Wait()
+
+			fmt.Fprintf(os.Stderr, "%s\n", stats.summary())
 
 			if len(errors) > 0 {
 				fmt.Fprintln(os.Stderr, "\n🚫 Errors encountered:")

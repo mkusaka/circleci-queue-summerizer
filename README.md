@@ -57,8 +57,8 @@ circleci-queue-summerizer -p gh/org/repo1 --format ndjson
 # Output to SQLite database
 circleci-queue-summerizer -p gh/org/repo1 --format sqlite -o queue_times.db
 
-# Silent mode (only errors)
-circleci-queue-summerizer -p gh/org/repo1 --silent
+# Verbose mode (show detailed progress)
+circleci-queue-summerizer -p gh/org/repo1 --verbose
 ```
 
 ### Options
@@ -71,7 +71,7 @@ circleci-queue-summerizer -p gh/org/repo1 --silent
 --output, -o      Output file path (required for sqlite format)
 --limit           Number of pipelines to fetch per project (default: 10)
 --months          Number of months to look back (default: 1)
---silent          Suppress all output except errors
+--verbose, -v     Show detailed progress messages on stderr
 ```
 
 ### SQLite Output

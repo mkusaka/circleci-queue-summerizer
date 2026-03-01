@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -1587,7 +1588,6 @@ func TestProcessProject_SQLite_SkipsRedundantAPICalls(t *testing.T) {
 		limit:        10,
 		cutoff:       time.Now().AddDate(0, -1, 0),
 		sqliteWriter: sw,
-		silent:       true,
 	}
 
 	// First run: all API calls should happen
@@ -1746,7 +1746,6 @@ func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 		limit:        10,
 		cutoff:       time.Now().AddDate(0, -1, 0),
 		sqliteWriter: sw,
-		silent:       true,
 	}
 
 	// First run: workflow is "running" → pipeline NOT fully processed
@@ -1787,4 +1786,273 @@ func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 		t.Errorf("2nd run: getJobDetails = %d, want 0 (should be skipped)", callCounts["getJobDetails"])
 	}
 	mu.Unlock()
+}
+
+// --- processingStats tests ---
+
+func TestProcessingStats_ConcurrentAccess(t *testing.T) {
+	s := &processingStats{}
+	var wg sync.WaitGroup
+	n := 100
+	for i := 0; i < n; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s.incPipeline(false)
+			s.incWorkflow(true)
+			s.incJob(false)
+		}()
+	}
+	wg.Wait()
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.pipelinesTotal != n {
+		t.Errorf("pipelinesTotal = %d, want %d", s.pipelinesTotal, n)
+	}
+	if s.pipelinesSkipped != 0 {
+		t.Errorf("pipelinesSkipped = %d, want 0", s.pipelinesSkipped)
+	}
+	if s.workflowsTotal != n {
+		t.Errorf("workflowsTotal = %d, want %d", s.workflowsTotal, n)
+	}
+	if s.workflowsSkipped != n {
+		t.Errorf("workflowsSkipped = %d, want %d", s.workflowsSkipped, n)
+	}
+	if s.jobsTotal != n {
+		t.Errorf("jobsTotal = %d, want %d", s.jobsTotal, n)
+	}
+	if s.jobsSkipped != 0 {
+		t.Errorf("jobsSkipped = %d, want 0", s.jobsSkipped)
+	}
+}
+
+func TestProcessingStats_Summary(t *testing.T) {
+	s := &processingStats{}
+	s.incPipeline(false)
+	s.incPipeline(true)
+	s.incWorkflow(false)
+	s.incWorkflow(false)
+	s.incWorkflow(true)
+	s.incJob(false)
+	s.incJob(false)
+	s.incJob(false)
+	s.incJob(true)
+
+	got := s.summary()
+	want := "Processed 2 pipelines (1 skipped), 3 workflows (1 skipped), 4 jobs (1 skipped)"
+	if got != want {
+		t.Errorf("summary() = %q, want %q", got, want)
+	}
+}
+
+func TestProcessingStats_SpinnerSuffix(t *testing.T) {
+	s := &processingStats{}
+	s.incPipeline(false)
+	s.incWorkflow(false)
+	s.incJob(false)
+	s.incJob(false)
+
+	got := s.spinnerSuffix()
+	want := " 1 pipelines, 1 workflows, 2 jobs processed..."
+	if got != want {
+		t.Errorf("spinnerSuffix() = %q, want %q", got, want)
+	}
+}
+
+func TestProcessProject_SQLite_StatsTracking(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	stats := &processingStats{}
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		stats:        stats,
+	})
+	if err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+
+	stats.mu.Lock()
+	defer stats.mu.Unlock()
+
+	// newMockCircleCIServer returns 1 pipeline, 1 workflow, 1 job
+	if stats.pipelinesTotal != 1 {
+		t.Errorf("pipelinesTotal = %d, want 1", stats.pipelinesTotal)
+	}
+	if stats.pipelinesSkipped != 0 {
+		t.Errorf("pipelinesSkipped = %d, want 0", stats.pipelinesSkipped)
+	}
+	if stats.workflowsTotal != 1 {
+		t.Errorf("workflowsTotal = %d, want 1", stats.workflowsTotal)
+	}
+	if stats.workflowsSkipped != 0 {
+		t.Errorf("workflowsSkipped = %d, want 0", stats.workflowsSkipped)
+	}
+	if stats.jobsTotal != 1 {
+		t.Errorf("jobsTotal = %d, want 1", stats.jobsTotal)
+	}
+	if stats.jobsSkipped != 0 {
+		t.Errorf("jobsSkipped = %d, want 0", stats.jobsSkipped)
+	}
+}
+
+func TestProcessProject_SQLite_SkipStats(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	// First run: populates DB
+	stats1 := &processingStats{}
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		stats:        stats1,
+	})
+	if err != nil {
+		t.Fatalf("processProject (1st): %v", err)
+	}
+
+	// Second run: should skip (pipeline fully processed)
+	stats2 := &processingStats{}
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		stats:        stats2,
+	})
+	if err != nil {
+		t.Fatalf("processProject (2nd): %v", err)
+	}
+
+	stats2.mu.Lock()
+	defer stats2.mu.Unlock()
+
+	if stats2.pipelinesTotal != 1 {
+		t.Errorf("2nd run: pipelinesTotal = %d, want 1", stats2.pipelinesTotal)
+	}
+	if stats2.pipelinesSkipped != 1 {
+		t.Errorf("2nd run: pipelinesSkipped = %d, want 1", stats2.pipelinesSkipped)
+	}
+}
+
+func TestProcessProject_VerboseOutput(t *testing.T) {
+	server := newMockCircleCIServer(t)
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	// First run to populate DB
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+	})
+	if err != nil {
+		t.Fatalf("processProject (populate): %v", err)
+	}
+
+	// Capture stderr for verbose=true run
+	origStderr := os.Stderr
+	r, w, _ := os.Pipe()
+	os.Stderr = w
+
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		verbose:      true,
+		sqliteWriter: sw,
+	})
+
+	w.Close()
+	os.Stderr = origStderr
+
+	if err != nil {
+		t.Fatalf("processProject (verbose): %v", err)
+	}
+
+	var buf bytes.Buffer
+	buf.ReadFrom(r)
+	output := buf.String()
+
+	if !strings.Contains(output, "Skipping pipeline") {
+		t.Errorf("verbose=true: expected 'Skipping pipeline' in stderr, got: %q", output)
+	}
+
+	// Now test verbose=false: should NOT contain skip messages
+	r2, w2, _ := os.Pipe()
+	os.Stderr = w2
+
+	err = processProject(context.Background(), processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		verbose:      false,
+		sqliteWriter: sw,
+	})
+
+	w2.Close()
+	os.Stderr = origStderr
+
+	if err != nil {
+		t.Fatalf("processProject (non-verbose): %v", err)
+	}
+
+	var buf2 bytes.Buffer
+	buf2.ReadFrom(r2)
+	output2 := buf2.String()
+
+	if strings.Contains(output2, "Skipping pipeline") {
+		t.Errorf("verbose=false: unexpected 'Skipping pipeline' in stderr, got: %q", output2)
+	}
 }
