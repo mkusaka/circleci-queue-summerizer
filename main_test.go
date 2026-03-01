@@ -2056,3 +2056,91 @@ func TestProcessProject_VerboseOutput(t *testing.T) {
 		t.Errorf("verbose=false: unexpected 'Skipping pipeline' in stderr, got: %q", output2)
 	}
 }
+
+func TestSQLiteWriter_ConcurrentAccess(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+
+	const numWriters = 5
+	const numInsertsPerWriter = 20
+
+	writers := make([]*SQLiteWriter, numWriters)
+	for i := range writers {
+		w, err := NewSQLiteWriter(dbPath)
+		if err != nil {
+			t.Fatalf("NewSQLiteWriter[%d]: %v", i, err)
+		}
+		writers[i] = w
+		defer w.Close()
+	}
+
+	var wg sync.WaitGroup
+	errCh := make(chan error, numWriters*numInsertsPerWriter*2)
+
+	for i, w := range writers {
+		wg.Add(1)
+		go func(w *SQLiteWriter, writerID int) {
+			defer wg.Done()
+			for j := 0; j < numInsertsPerWriter; j++ {
+				id := fmt.Sprintf("writer%d-pipe-%d", writerID, j)
+				p := PipelineItem{
+					ID:          id,
+					ProjectSlug: "gh/org/repo",
+					Number:      writerID*1000 + j,
+					State:       "created",
+					CreatedAt:   "2026-01-15T10:00:00Z",
+					UpdatedAt:   "2026-01-15T10:01:00Z",
+				}
+				if err := w.InsertPipeline(p); err != nil {
+					errCh <- fmt.Errorf("InsertPipeline[%s]: %w", id, err)
+				}
+
+				wfID := fmt.Sprintf("writer%d-wf-%d", writerID, j)
+				wf := WorkflowItem{
+					ID:             wfID,
+					PipelineID:     id,
+					Name:           "build",
+					Status:         "success",
+					CreatedAt:      "2026-01-15T10:00:00Z",
+					StoppedAt:      "2026-01-15T10:05:00Z",
+					PipelineNumber: writerID*1000 + j,
+					ProjectSlug:    "gh/org/repo",
+				}
+				if err := w.InsertWorkflow(wf); err != nil {
+					errCh <- fmt.Errorf("InsertWorkflow[%s]: %w", wfID, err)
+				}
+			}
+		}(w, i)
+	}
+
+	wg.Wait()
+	close(errCh)
+
+	var errs []error
+	for err := range errCh {
+		errs = append(errs, err)
+	}
+	if len(errs) > 0 {
+		for _, err := range errs {
+			t.Errorf("%v", err)
+		}
+		t.Fatalf("got %d errors from concurrent writes", len(errs))
+	}
+
+	// Verify all rows were written
+	verifyWriter := writers[0]
+	var pipelineCount, workflowCount int
+	if err := verifyWriter.db.QueryRow("SELECT COUNT(*) FROM pipelines").Scan(&pipelineCount); err != nil {
+		t.Fatalf("count pipelines: %v", err)
+	}
+	if err := verifyWriter.db.QueryRow("SELECT COUNT(*) FROM workflows").Scan(&workflowCount); err != nil {
+		t.Fatalf("count workflows: %v", err)
+	}
+
+	expectedCount := numWriters * numInsertsPerWriter
+	if pipelineCount != expectedCount {
+		t.Errorf("pipelines count = %d, want %d", pipelineCount, expectedCount)
+	}
+	if workflowCount != expectedCount {
+		t.Errorf("workflows count = %d, want %d", workflowCount, expectedCount)
+	}
+}
