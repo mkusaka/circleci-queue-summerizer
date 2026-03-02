@@ -1658,6 +1658,149 @@ func TestProcessProject_SQLite_SkipsRedundantAPICalls(t *testing.T) {
 	}
 }
 
+func TestProcessProject_SQLite_SkipsNotRunJobDetails(t *testing.T) {
+	var mu sync.Mutex
+	jobDetailCalls := map[string]int{}
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+		mu.Lock()
+		switch {
+		case strings.HasSuffix(path, "/job/1"):
+			jobDetailCalls["job-1"]++
+		case strings.HasSuffix(path, "/job/2"):
+			jobDetailCalls["job-2"]++
+		}
+		mu.Unlock()
+
+		switch {
+		case strings.HasSuffix(path, "/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{{
+					ID:          "pipe-1",
+					ProjectSlug: "gh/org/repo",
+					Number:      1,
+					State:       "created",
+					CreatedAt:   time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{{
+					ID:         "wf-1",
+					PipelineID: "pipe-1",
+					Name:       "build",
+					Status:     "success",
+					CreatedAt:  time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{
+					{
+						ID:          "job-1",
+						Name:        "test-job",
+						Type:        "build",
+						Status:      "success",
+						JobNumber:   1,
+						ProjectSlug: "gh/org/repo",
+					},
+					{
+						ID:          "job-2",
+						Name:        "skipped-job",
+						Type:        "build",
+						Status:      "not_run",
+						JobNumber:   2,
+						ProjectSlug: "gh/org/repo",
+					},
+				},
+			})
+		case strings.HasSuffix(path, "/job/1"):
+			jr := JobResponse{
+				CreatedAt: "2026-01-15T10:00:00Z",
+				QueuedAt:  "2026-01-15T10:00:01Z",
+				StartedAt: "2026-01-15T10:00:05Z",
+				StoppedAt: "2026-01-15T10:01:00Z",
+				Duration:  55000,
+				Name:      "test-job",
+				Number:    1,
+				Status:    "success",
+				WebURL:    "https://circleci.com/jobs/1",
+			}
+			jr.Project.ID = "proj-1"
+			jr.Pipeline.ID = "pipe-1"
+			jr.LatestWorkflow.ID = "wf-1"
+			json.NewEncoder(w).Encode(jr)
+		case strings.HasSuffix(path, "/job/2"):
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"message": "Job not found."})
+		case strings.HasPrefix(path, "/api/v2/project/"):
+			json.NewEncoder(w).Encode(ProjectResponse{
+				ID:   "proj-1",
+				Slug: "gh/org/repo",
+				Name: "repo",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	cfg := processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+	}
+
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	if jobDetailCalls["job-1"] != 1 {
+		t.Errorf("getJobDetails(job-1) = %d, want 1", jobDetailCalls["job-1"])
+	}
+	if jobDetailCalls["job-2"] != 0 {
+		t.Errorf("getJobDetails(job-2) = %d, want 0 for not_run", jobDetailCalls["job-2"])
+	}
+
+	var totalJobs int
+	if err := sw.db.QueryRow("SELECT COUNT(*) FROM jobs").Scan(&totalJobs); err != nil {
+		t.Fatalf("count jobs: %v", err)
+	}
+	if totalJobs != 2 {
+		t.Errorf("jobs count = %d, want 2", totalJobs)
+	}
+
+	var status string
+	var createdAt sql.NullString
+	if err := sw.db.QueryRow("SELECT status, created_at FROM jobs WHERE id = ?", "job-2").Scan(&status, &createdAt); err != nil {
+		t.Fatalf("query job-2: %v", err)
+	}
+	if status != "not_run" {
+		t.Errorf("job-2 status = %q, want not_run", status)
+	}
+	if createdAt.Valid {
+		t.Errorf("job-2 created_at should be NULL, got %q", createdAt.String)
+	}
+}
+
 func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 	runCount := 0
 	var mu sync.Mutex
