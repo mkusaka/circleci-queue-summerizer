@@ -1801,6 +1801,256 @@ func TestProcessProject_SQLite_SkipsNotRunJobDetails(t *testing.T) {
 	}
 }
 
+func TestProcessProject_SQLite_Stores404JobWithoutWarning(t *testing.T) {
+	var mu sync.Mutex
+	jobDetailCalls := 0
+	var warnings []string
+
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		path := r.URL.Path
+
+		switch {
+		case strings.HasSuffix(path, "/pipeline"):
+			json.NewEncoder(w).Encode(PipelineResponse{
+				Items: []PipelineItem{{
+					ID:          "pipe-1",
+					ProjectSlug: "gh/org/repo",
+					Number:      1,
+					State:       "created",
+					CreatedAt:   time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+				Items: []WorkflowItem{{
+					ID:         "wf-1",
+					PipelineID: "pipe-1",
+					Name:       "build",
+					Status:     "canceled",
+					CreatedAt:  time.Now().Format(time.RFC3339),
+				}},
+			})
+		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			json.NewEncoder(w).Encode(WorkflowJobsResponse{
+				Items: []WorkflowJobItem{{
+					ID:          "job-404",
+					Name:        "canceled-job",
+					Type:        "build",
+					Status:      "canceled",
+					JobNumber:   2,
+					StartedAt:   "2026-01-15T10:00:05Z",
+					StoppedAt:   "2026-01-15T10:00:10Z",
+					ProjectSlug: "gh/org/repo",
+				}},
+			})
+		case strings.HasSuffix(path, "/job/2"):
+			mu.Lock()
+			jobDetailCalls++
+			mu.Unlock()
+			w.WriteHeader(http.StatusNotFound)
+			json.NewEncoder(w).Encode(map[string]string{"message": "Job not found."})
+		case strings.HasPrefix(path, "/api/v2/project/"):
+			json.NewEncoder(w).Encode(ProjectResponse{
+				ID:   "proj-1",
+				Slug: "gh/org/repo",
+				Name: "repo",
+			})
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+
+	dbPath := filepath.Join(t.TempDir(), "test.db")
+	sw, err := NewSQLiteWriter(dbPath)
+	if err != nil {
+		t.Fatalf("NewSQLiteWriter: %v", err)
+	}
+	defer sw.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	cfg := processProjectConfig{
+		client:       client,
+		slug:         "gh/org/repo",
+		limit:        10,
+		cutoff:       time.Now().AddDate(0, -1, 0),
+		sqliteWriter: sw,
+		warnf: func(format string, args ...any) {
+			mu.Lock()
+			defer mu.Unlock()
+			warnings = append(warnings, fmt.Sprintf(format, args...))
+		},
+	}
+
+	if err := processProject(context.Background(), cfg); err != nil {
+		t.Fatalf("processProject: %v", err)
+	}
+
+	mu.Lock()
+	if jobDetailCalls != 1 {
+		t.Errorf("getJobDetails calls = %d, want 1", jobDetailCalls)
+	}
+	if len(warnings) != 0 {
+		t.Errorf("warnings = %d, want 0, got: %q", len(warnings), warnings)
+	}
+	mu.Unlock()
+
+	var status string
+	var createdAt sql.NullString
+	if err := sw.db.QueryRow("SELECT status, created_at FROM jobs WHERE id = ?", "job-404").Scan(&status, &createdAt); err != nil {
+		t.Fatalf("query job-404: %v", err)
+	}
+	if status != "canceled" {
+		t.Errorf("job-404 status = %q, want canceled", status)
+	}
+	if createdAt.Valid {
+		t.Errorf("job-404 created_at should be NULL, got %q", createdAt.String)
+	}
+}
+
+func TestProcessProject_SQLite_SkipsJobsLikelyWithoutDetails(t *testing.T) {
+	cases := []struct {
+		name string
+		job  WorkflowJobItem
+	}{
+		{
+			name: "lock_job",
+			job: WorkflowJobItem{
+				ID:          "job-lock",
+				Name:        "serial-start",
+				Type:        "lock",
+				Status:      "success",
+				JobNumber:   2,
+				StartedAt:   "2026-01-15T10:00:05Z",
+				StoppedAt:   "2026-01-15T10:00:06Z",
+				ProjectSlug: "gh/org/repo",
+			},
+		},
+		{
+			name: "canceled_without_started_at",
+			job: WorkflowJobItem{
+				ID:          "job-canceled",
+				Name:        "downstream-job",
+				Type:        "build",
+				Status:      "canceled",
+				JobNumber:   3,
+				ProjectSlug: "gh/org/repo",
+			},
+		},
+	}
+
+	for _, tc := range cases {
+		tc := tc
+		t.Run(tc.name, func(t *testing.T) {
+			var mu sync.Mutex
+			jobDetailCalls := 0
+			var warnings []string
+
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				path := r.URL.Path
+
+				switch {
+				case strings.HasSuffix(path, "/pipeline"):
+					json.NewEncoder(w).Encode(PipelineResponse{
+						Items: []PipelineItem{{
+							ID:          "pipe-1",
+							ProjectSlug: "gh/org/repo",
+							Number:      1,
+							State:       "created",
+							CreatedAt:   time.Now().Format(time.RFC3339),
+						}},
+					})
+				case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
+					json.NewEncoder(w).Encode(PipelineWorkflowResponse{
+						Items: []WorkflowItem{{
+							ID:         "wf-1",
+							PipelineID: "pipe-1",
+							Name:       "build",
+							Status:     "canceled",
+							CreatedAt:  time.Now().Format(time.RFC3339),
+						}},
+					})
+				case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+					json.NewEncoder(w).Encode(WorkflowJobsResponse{
+						Items: []WorkflowJobItem{tc.job},
+					})
+				case strings.HasSuffix(path, fmt.Sprintf("/job/%d", tc.job.JobNumber)):
+					mu.Lock()
+					jobDetailCalls++
+					mu.Unlock()
+					w.WriteHeader(http.StatusNotFound)
+					json.NewEncoder(w).Encode(map[string]string{"message": "Job not found."})
+				case strings.HasPrefix(path, "/api/v2/project/"):
+					json.NewEncoder(w).Encode(ProjectResponse{
+						ID:   "proj-1",
+						Slug: "gh/org/repo",
+						Name: "repo",
+					})
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+
+			dbPath := filepath.Join(t.TempDir(), "test.db")
+			sw, err := NewSQLiteWriter(dbPath)
+			if err != nil {
+				t.Fatalf("NewSQLiteWriter: %v", err)
+			}
+			defer sw.Close()
+
+			client := &CircleCIClient{
+				Token:   "test-token",
+				Client:  server.Client(),
+				BaseURL: server.URL,
+			}
+
+			cfg := processProjectConfig{
+				client:       client,
+				slug:         "gh/org/repo",
+				limit:        10,
+				cutoff:       time.Now().AddDate(0, -1, 0),
+				sqliteWriter: sw,
+				warnf: func(format string, args ...any) {
+					mu.Lock()
+					defer mu.Unlock()
+					warnings = append(warnings, fmt.Sprintf(format, args...))
+				},
+			}
+
+			if err := processProject(context.Background(), cfg); err != nil {
+				t.Fatalf("processProject: %v", err)
+			}
+
+			mu.Lock()
+			if jobDetailCalls != 0 {
+				t.Errorf("getJobDetails calls = %d, want 0", jobDetailCalls)
+			}
+			if len(warnings) != 0 {
+				t.Errorf("warnings = %d, want 0, got: %q", len(warnings), warnings)
+			}
+			mu.Unlock()
+
+			var status string
+			var createdAt sql.NullString
+			if err := sw.db.QueryRow("SELECT status, created_at FROM jobs WHERE id = ?", tc.job.ID).Scan(&status, &createdAt); err != nil {
+				t.Fatalf("query %s: %v", tc.job.ID, err)
+			}
+			if status != tc.job.Status {
+				t.Errorf("status = %q, want %q", status, tc.job.Status)
+			}
+			if createdAt.Valid {
+				t.Errorf("created_at should be NULL, got %q", createdAt.String)
+			}
+		})
+	}
+}
+
 func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 	runCount := 0
 	var mu sync.Mutex
