@@ -786,6 +786,16 @@ func nilIfZero(n int) any {
 	return n
 }
 
+func isJobDetailsNotFound(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "api error for job") &&
+		strings.Contains(msg, "404") &&
+		strings.Contains(msg, "job not found")
+}
+
 // --- Project Slug Expansion ---
 
 func expandProjectSlugs(ctx context.Context, client *CircleCIClient, projects []string) ([]string, error) {
@@ -1057,7 +1067,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 					default:
 					}
 
-					if job.JobNumber == 0 || job.Status == "not_run" {
+					handleJobWithoutDetails := func() error {
 						if cfg.sqliteWriter != nil {
 							if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, nil, nil); err != nil {
 								cfg.warnf("Warning: failed to insert job without details %s: %v\n", job.ID, err)
@@ -1090,6 +1100,13 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 							}
 						}
 						hasProcessedPipeline = true
+						return nil
+					}
+
+					if job.JobNumber == 0 || job.Status == "not_run" {
+						if err := handleJobWithoutDetails(); err != nil {
+							return err
+						}
 						continue
 					}
 
@@ -1114,6 +1131,15 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 					jobDetails, err := cfg.client.GetJobDetails(ctx, slug, job.JobNumber)
 					if err != nil {
+						if isJobDetailsNotFound(err) {
+							if cfg.verbose {
+								cfg.warnf("Skipping job %s/%d in workflow %s: job details not found\n", job.Name, job.JobNumber, workflow.Name)
+							}
+							if err := handleJobWithoutDetails(); err != nil {
+								return err
+							}
+							continue
+						}
 						cfg.warnf("⚠️  Job %d in workflow %s: %v\n", job.JobNumber, workflow.Name, err)
 						continue
 					}
