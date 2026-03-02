@@ -796,6 +796,22 @@ func isJobDetailsNotFound(err error) bool {
 		strings.Contains(msg, "job not found")
 }
 
+func shouldSkipJobDetails(job WorkflowJobItem) bool {
+	if job.JobNumber == 0 || job.Status == "not_run" {
+		return true
+	}
+
+	// lock/unlock jobs (serial-group control) appear in workflow jobs, but
+	// project job-details endpoint often returns 404 for them.
+	if job.Type == "lock" || job.Type == "unlock" {
+		return true
+	}
+
+	// For canceled jobs, missing started_at strongly indicates the job never
+	// actually ran and detail endpoint is typically unavailable.
+	return job.Status == "canceled" && strings.TrimSpace(job.StartedAt) == ""
+}
+
 // --- Project Slug Expansion ---
 
 func expandProjectSlugs(ctx context.Context, client *CircleCIClient, projects []string) ([]string, error) {
@@ -1103,7 +1119,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 						return nil
 					}
 
-					if job.JobNumber == 0 || job.Status == "not_run" {
+					if shouldSkipJobDetails(job) {
 						if err := handleJobWithoutDetails(); err != nil {
 							return err
 						}
