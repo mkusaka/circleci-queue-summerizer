@@ -1057,10 +1057,10 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 					default:
 					}
 
-					if job.JobNumber == 0 {
+					if job.JobNumber == 0 || job.Status == "not_run" {
 						if cfg.sqliteWriter != nil {
 							if err := cfg.sqliteWriter.InsertJob(job, workflow.ID, nil, nil); err != nil {
-								cfg.warnf("Warning: failed to insert approval job %s: %v\n", job.ID, err)
+								cfg.warnf("Warning: failed to insert job without details %s: %v\n", job.ID, err)
 							}
 						}
 						if cfg.jobsChan != nil {
