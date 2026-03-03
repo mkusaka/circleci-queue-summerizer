@@ -8,7 +8,7 @@ A CLI tool to analyze queue times of CircleCI jobs.
 - Support multiple projects at once
 - Auto-discover all projects in an organization with `-p all:{org-slug}`
 - Configurable number of pipelines to analyze
-- Time-based filtering with `--months` flag
+- Time-based filtering with `--since` flag
 - Output in table, NDJSON, or SQLite format
 - SQLite output with upsert support (`INSERT OR REPLACE`) for incremental data collection
 - Automatic retry with exponential backoff for API rate limits (429) and server errors (5xx)
@@ -49,7 +49,13 @@ circleci-queue-summerizer -p all:gh/org
 circleci-queue-summerizer -p gh/org/repo1 --limit 30
 
 # Get queue times for the last 3 months
-circleci-queue-summerizer -p gh/org/repo1 --months 3
+circleci-queue-summerizer -p gh/org/repo1 --since 3months
+
+# Get queue times for the last week
+circleci-queue-summerizer -p gh/org/repo1 --since 1w
+
+# Get queue times for the last day
+circleci-queue-summerizer -p gh/org/repo1 --since 1day
 
 # Output in NDJSON format
 circleci-queue-summerizer -p gh/org/repo1 --format ndjson
@@ -70,7 +76,7 @@ circleci-queue-summerizer -p gh/org/repo1 --verbose
 --format          Output format: table, ndjson, or sqlite (default: table)
 --output, -o      Output file path (required for sqlite format)
 --limit           Number of pipelines to fetch per project (default: 10)
---months          Number of months to look back (default: 1)
+--since           Relative lookback duration (e.g. 1w, 1day, 1month, 24h) (default: 1month)
 --verbose, -v     Show detailed progress messages on stderr
 ```
 
@@ -87,7 +93,7 @@ Re-running with the same `-o` path performs upserts — existing rows are update
 
 ```
 # Collect data
-circleci-queue-summerizer -p gh/org/repo --format sqlite -o data.db --months 3
+circleci-queue-summerizer -p gh/org/repo --format sqlite -o data.db --since 3months
 
 # Query with sqlite3
 sqlite3 data.db "SELECT name, AVG(queue_time_ms) FROM jobs GROUP BY name"

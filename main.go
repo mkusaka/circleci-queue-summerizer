@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -41,6 +42,8 @@ var terminalJobStatuses = map[string]bool{
 	"timedout":            true,
 	"not_run":             true,
 }
+
+var sincePattern = regexp.MustCompile(`^(\d+)\s*([a-zA-Z]+)$`)
 
 // --- API Response Types ---
 
@@ -923,17 +926,17 @@ func (s *processingStats) spinnerSuffix() string {
 // --- Process Project ---
 
 type processProjectConfig struct {
-	client       *CircleCIClient
-	slug         string
-	limit        int
-	monthsSet    bool
-	cutoff       time.Time
-	verbose      bool
-	sqliteWriter *SQLiteWriter
-	jobsChan     chan<- JobQueueInfo
-	stats        *processingStats
-	onProgress   func()
-	warnf        func(format string, args ...any)
+	client        *CircleCIClient
+	slug          string
+	limit         int
+	timeFilterSet bool
+	cutoff        time.Time
+	verbose       bool
+	sqliteWriter  *SQLiteWriter
+	jobsChan      chan<- JobQueueInfo
+	stats         *processingStats
+	onProgress    func()
+	warnf         func(format string, args ...any)
 }
 
 func processProject(ctx context.Context, cfg processProjectConfig) error {
@@ -973,7 +976,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 
 		tooOld := false
 		for _, pipeline := range pipelines.Items {
-			if !cfg.monthsSet && count >= cfg.limit {
+			if !cfg.timeFilterSet && count >= cfg.limit {
 				break
 			}
 
@@ -1258,7 +1261,7 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 			}
 		}
 
-		if tooOld || (!cfg.monthsSet && count >= cfg.limit) {
+		if tooOld || (!cfg.timeFilterSet && count >= cfg.limit) {
 			break
 		}
 
@@ -1269,6 +1272,59 @@ func processProject(ctx context.Context, cfg processProjectConfig) error {
 	}
 
 	return nil
+}
+
+type sinceValue struct {
+	months   int
+	duration time.Duration
+}
+
+func (v sinceValue) cutoff(now time.Time) time.Time {
+	if v.months > 0 {
+		return now.AddDate(0, -v.months, 0)
+	}
+	return now.Add(-v.duration)
+}
+
+func parseSinceValue(raw string) (sinceValue, error) {
+	since := strings.TrimSpace(raw)
+	if since == "" {
+		return sinceValue{}, fmt.Errorf("value cannot be empty")
+	}
+
+	matches := sincePattern.FindStringSubmatch(strings.ToLower(since))
+	if matches != nil {
+		value, err := strconv.Atoi(matches[1])
+		if err != nil || value <= 0 {
+			return sinceValue{}, fmt.Errorf("duration must be greater than zero")
+		}
+
+		switch matches[2] {
+		case "mo", "month", "months":
+			return sinceValue{months: value}, nil
+		case "w", "week", "weeks":
+			return sinceValue{duration: time.Duration(value) * 7 * 24 * time.Hour}, nil
+		case "d", "day", "days":
+			return sinceValue{duration: time.Duration(value) * 24 * time.Hour}, nil
+		case "h", "hour", "hours":
+			return sinceValue{duration: time.Duration(value) * time.Hour}, nil
+		case "m", "min", "mins", "minute", "minutes":
+			return sinceValue{duration: time.Duration(value) * time.Minute}, nil
+		case "s", "sec", "secs", "second", "seconds":
+			return sinceValue{duration: time.Duration(value) * time.Second}, nil
+		default:
+			return sinceValue{}, fmt.Errorf("unsupported unit %q (supported: month, w, day, h, m, s)", matches[2])
+		}
+	}
+
+	if d, err := time.ParseDuration(since); err == nil {
+		if d <= 0 {
+			return sinceValue{}, fmt.Errorf("duration must be greater than zero")
+		}
+		return sinceValue{duration: d}, nil
+	}
+
+	return sinceValue{}, fmt.Errorf("expected formats like 1w, 1day, 1month, or 24h")
 }
 
 // --- Main ---
@@ -1305,10 +1361,10 @@ func newApp() *cli.App {
 				Value: 10,
 				Usage: "Number of pipelines to fetch per project",
 			},
-			&cli.IntFlag{
-				Name:  "months",
-				Value: 1,
-				Usage: "Number of months to look back",
+			&cli.StringFlag{
+				Name:  "since",
+				Value: "1month",
+				Usage: "Relative lookback duration (e.g. 1w, 1day, 1month, 24h)",
 			},
 			&cli.BoolFlag{
 				Name:    "verbose",
@@ -1328,8 +1384,12 @@ func newApp() *cli.App {
 			}
 
 			limit := c.Int("limit")
-			monthsSet := c.IsSet("months")
-			cutoff := time.Now().AddDate(0, -c.Int("months"), 0)
+			since, err := parseSinceValue(c.String("since"))
+			if err != nil {
+				return fmt.Errorf("invalid --since value %q: %w", c.String("since"), err)
+			}
+			timeFilterSet := c.IsSet("since")
+			cutoff := since.cutoff(time.Now())
 
 			client := &CircleCIClient{
 				Token:  c.String("token"),
@@ -1433,17 +1493,17 @@ func newApp() *cli.App {
 				go func(slug string) {
 					defer projectWg.Done()
 					if err := processProject(ctx, processProjectConfig{
-						client:       client,
-						slug:         slug,
-						limit:        limit,
-						monthsSet:    monthsSet,
-						cutoff:       cutoff,
-						verbose:      verbose,
-						sqliteWriter: sqliteWriter,
-						jobsChan:     jobsChan,
-						stats:        stats,
-						onProgress:   onProgress,
-						warnf:        wb.warnf,
+						client:        client,
+						slug:          slug,
+						limit:         limit,
+						timeFilterSet: timeFilterSet,
+						cutoff:        cutoff,
+						verbose:       verbose,
+						sqliteWriter:  sqliteWriter,
+						jobsChan:      jobsChan,
+						stats:         stats,
+						onProgress:    onProgress,
+						warnf:         wb.warnf,
 					}); err != nil {
 						errChan <- fmt.Errorf("❌ %v", err)
 					}
