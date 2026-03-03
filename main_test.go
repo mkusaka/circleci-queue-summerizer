@@ -801,6 +801,73 @@ func TestCLI_SqliteWithoutOutput(t *testing.T) {
 	}
 }
 
+func TestParseSinceValue(t *testing.T) {
+	tests := []struct {
+		name         string
+		input        string
+		wantDuration time.Duration
+		wantMonths   int
+		wantErr      string
+	}{
+		{name: "week shorthand", input: "1w", wantDuration: 7 * 24 * time.Hour},
+		{name: "day long unit", input: "1day", wantDuration: 24 * time.Hour},
+		{name: "go duration", input: "24h", wantDuration: 24 * time.Hour},
+		{name: "minutes long unit", input: "10minutes", wantDuration: 10 * time.Minute},
+		{name: "month long unit", input: "1month", wantMonths: 1},
+		{name: "invalid empty", input: "", wantErr: "cannot be empty"},
+		{name: "invalid unit", input: "1y", wantErr: "unsupported unit"},
+		{name: "invalid format", input: "day1", wantErr: "expected formats"},
+		{name: "invalid zero", input: "0d", wantErr: "greater than zero"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := parseSinceValue(tc.input)
+			if tc.wantErr != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tc.wantErr)
+				}
+				if !strings.Contains(err.Error(), tc.wantErr) {
+					t.Fatalf("error = %q, want to contain %q", err.Error(), tc.wantErr)
+				}
+				return
+			}
+
+			if err != nil {
+				t.Fatalf("parseSinceValue(%q): %v", tc.input, err)
+			}
+			if got.duration != tc.wantDuration {
+				t.Fatalf("parseSinceValue(%q) duration = %v, want %v", tc.input, got.duration, tc.wantDuration)
+			}
+			if got.months != tc.wantMonths {
+				t.Fatalf("parseSinceValue(%q) months = %d, want %d", tc.input, got.months, tc.wantMonths)
+			}
+		})
+	}
+}
+
+func TestCLI_MonthsFlagRemoved(t *testing.T) {
+	app := newApp()
+	err := app.Run([]string{"app", "-p", "gh/org/repo", "--token", "dummy", "--months", "1"})
+	if err == nil {
+		t.Fatal("expected error for removed --months flag")
+	}
+	if !strings.Contains(err.Error(), "flag provided but not defined") {
+		t.Errorf("error = %q, want to contain 'flag provided but not defined'", err.Error())
+	}
+}
+
+func TestCLI_InvalidSince(t *testing.T) {
+	app := newApp()
+	err := app.Run([]string{"app", "-p", "gh/org/repo", "--token", "dummy", "--since", "yesterday"})
+	if err == nil {
+		t.Fatal("expected error for invalid --since")
+	}
+	if !strings.Contains(err.Error(), "invalid --since value") {
+		t.Errorf("error = %q, want to contain 'invalid --since value'", err.Error())
+	}
+}
+
 // --- Mock API server for integration tests ---
 
 // newMockCircleCIServer creates a mock server that responds to the
