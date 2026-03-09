@@ -17,8 +17,8 @@ github.com/mattn/go-colorable v0.1.2/go.mod h1:U0ppj6V5qS13XJ6of8GYAs25YV2eR4EVc
 github.com/mattn/go-isatty v0.0.8/go.mod h1:Iq45c/XA43vh69/j3iqttzPXn0bhXyGjM0Hdxcsrc5s=
 github.com/mattn/go-isatty v0.0.20 h1:xfD0iDuEKnDkl03q4limB+vH+GxLEtL/jb4xVJSWWEY=
 github.com/mattn/go-isatty v0.0.20/go.mod h1:W+V8PltTTMOvKvAeJH7IuucS94S2C6jfK/D7dTCTo3Y=
-github.com/mkusaka/openapigo v0.0.0-20260307045818-a8464ffe628a h1:2+nqG0uxjeQLl2eeXajrMkL7yNxACifXLU3t7EsNF0M=
-github.com/mkusaka/openapigo v0.0.0-20260307045818-a8464ffe628a/go.mod h1:RBOqtTwkyNQzRIwfKfkYXYbEgkNic+oHNeGJguZo8Do=
+github.com/mkusaka/openapigo v0.0.0-20260309134111-9b35d9b2aa8f h1:EDoihiT3IQrRm61nzGB5QCGDfLARG1tjuVARBrhQZ7A=
+github.com/mkusaka/openapigo v0.0.0-20260309134111-9b35d9b2aa8f/go.mod h1:RBOqtTwkyNQzRIwfKfkYXYbEgkNic+oHNeGJguZo8Do=
 github.com/ncruces/go-strftime v1.0.0 h1:HMFp8mLCTPp341M/ZnA4qaf7ZlsbTc+miZjCLOFAw7w=
 github.com/ncruces/go-strftime v1.0.0/go.mod h1:Fwc5htZGVVkseilnfgOVb9mKy6w1naJmn9CehxcKcls=
 github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec h1:W09IVJc94icq4NjY3clb7Lk8O1qJ8BdBEF8z0ibU0rE=

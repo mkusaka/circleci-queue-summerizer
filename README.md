@@ -124,4 +124,4 @@ It also rewrites CircleCI's slash-delimited `project-slug` / `org-slug` path par
 - `project-slug` -> `{provider}/{organization}/{project}`
 - `org-slug` -> `{provider}/{organization}`
 
-This keeps the generated client aligned with CircleCI's actual URL shape without relying on runtime path rewriting.
+This keeps the generated client aligned with CircleCI's actual URL shape without relying on runtime path rewriting. CI re-runs `go generate ./...` and fails if the checked-in generated files drift.
