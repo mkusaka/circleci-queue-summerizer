@@ -5,6 +5,7 @@ go 1.26.0
 require (
 	github.com/briandowns/spinner v1.23.2
 	github.com/mattn/go-isatty v0.0.20
+	github.com/mkusaka/openapigo v0.0.0-20260307045818-a8464ffe628a
 	github.com/urfave/cli/v2 v2.27.5
 	modernc.org/sqlite v1.46.1
 )

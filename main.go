@@ -5,9 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"math/rand"
 	"net/http"
 	"os"
 	"os/signal"
@@ -237,82 +235,11 @@ const (
 )
 
 func (c *CircleCIClient) doWithRetry(req *http.Request) (*http.Response, error) {
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		resp, err := c.Client.Do(req)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-			return resp, nil
-		}
-
-		if attempt == maxRetries {
-			return resp, nil
-		}
-
-		var wait time.Duration
-		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-			if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
-				wait = time.Duration(seconds) * time.Second
-			}
-		}
-		if wait == 0 {
-			wait = initialBackoff * time.Duration(1<<uint(attempt))
-		}
-		jitter := time.Duration(float64(wait) * rand.Float64() * 0.5)
-		wait += jitter
-
-		resp.Body.Close()
-
-		if c.Warnf != nil {
-			c.Warnf("Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
-		} else {
-			fmt.Fprintf(os.Stderr, "Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
-		}
-
-		select {
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		case <-time.After(wait):
-		}
+	client := c.Client
+	if client == nil {
+		client = http.DefaultClient
 	}
-
-	return nil, fmt.Errorf("exceeded maximum retries")
-}
-
-func (c *CircleCIClient) GetJobDetails(ctx context.Context, projectSlug string, jobNumber int) (*JobResponse, error) {
-	url := fmt.Sprintf("%s/api/v2/project/%s/job/%d", c.baseURL(), projectSlug, jobNumber)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error for job %d: %s - %s (URL: %s)",
-			jobNumber, resp.Status, string(body), url)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body for job %d: %v", jobNumber, err)
-	}
-
-	var job JobResponse
-	if err := json.Unmarshal(body, &job); err != nil {
-		return nil, fmt.Errorf("JSON decode error for job %d: %v (body: %s)",
-			jobNumber, err, string(body))
-	}
-
-	return &job, nil
+	return doRequestWithRetry(req, client.Do, c.Warnf)
 }
 
 func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (*WorkflowResponse, error) {
@@ -335,161 +262,6 @@ func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (
 	}
 
 	return &workflows, nil
-}
-
-func (c *CircleCIClient) GetWorkflowJobs(ctx context.Context, workflowID string, pageToken string) (*WorkflowJobsResponse, error) {
-	baseURL := fmt.Sprintf("%s/api/v2/workflow/%s/job", c.baseURL(), workflowID)
-	url := baseURL
-	if pageToken != "" {
-		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s (URL: %s)", resp.Status, string(body), url)
-	}
-
-	body, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return nil, fmt.Errorf("failed to read response body: %v", err)
-	}
-
-	var jobs WorkflowJobsResponse
-	if err := json.Unmarshal(body, &jobs); err != nil {
-		return nil, fmt.Errorf("JSON decode error: %v (body: %s)", err, string(body))
-	}
-
-	return &jobs, nil
-}
-
-func (c *CircleCIClient) GetPipelines(ctx context.Context, projectSlug string, pageToken string) (*PipelineResponse, error) {
-	baseURL := fmt.Sprintf("%s/api/v2/project/%s/pipeline", c.baseURL(), projectSlug)
-	url := baseURL
-	if pageToken != "" {
-		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
-	}
-
-	var pipelines PipelineResponse
-	if err := json.NewDecoder(resp.Body).Decode(&pipelines); err != nil {
-		return nil, fmt.Errorf("JSON decode error: %v", err)
-	}
-
-	return &pipelines, nil
-}
-
-func (c *CircleCIClient) GetPipelineWorkflows(ctx context.Context, pipelineID string, pageToken string) (*PipelineWorkflowResponse, error) {
-	baseURL := fmt.Sprintf("%s/api/v2/pipeline/%s/workflow", c.baseURL(), pipelineID)
-	url := baseURL
-	if pageToken != "" {
-		url = fmt.Sprintf("%s?page-token=%s", baseURL, pageToken)
-	}
-
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
-	}
-
-	var workflows PipelineWorkflowResponse
-	if err := json.NewDecoder(resp.Body).Decode(&workflows); err != nil {
-		return nil, fmt.Errorf("JSON decode error: %v", err)
-	}
-
-	return &workflows, nil
-}
-
-func (c *CircleCIClient) GetProject(ctx context.Context, projectSlug string) (*ProjectResponse, error) {
-	url := fmt.Sprintf("%s/api/v2/project/%s", c.baseURL(), projectSlug)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
-	}
-
-	var project ProjectResponse
-	if err := json.NewDecoder(resp.Body).Decode(&project); err != nil {
-		return nil, fmt.Errorf("JSON decode error: %v", err)
-	}
-
-	return &project, nil
-}
-
-func (c *CircleCIClient) GetOrgProjects(ctx context.Context, orgSlug string) ([]string, error) {
-	url := fmt.Sprintf("%s/api/v2/insights/%s/summary", c.baseURL(), orgSlug)
-	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-
-	req.Header.Set("Circle-Token", c.Token)
-	resp, err := c.doWithRetry(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("API error: %s - %s", resp.Status, string(body))
-	}
-
-	var summary OrgSummaryResponse
-	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
-		return nil, fmt.Errorf("JSON decode error: %v", err)
-	}
-
-	return summary.AllProjects, nil
 }
 
 // --- SQLite Writer ---
@@ -790,13 +562,7 @@ func nilIfZero(n int) any {
 }
 
 func isJobDetailsNotFound(err error) bool {
-	if err == nil {
-		return false
-	}
-	msg := strings.ToLower(err.Error())
-	return strings.Contains(msg, "api error for job") &&
-		strings.Contains(msg, "404") &&
-		strings.Contains(msg, "job not found")
+	return isJobDetailsNotFoundError(err)
 }
 
 func shouldSkipJobDetails(job WorkflowJobItem) bool {
