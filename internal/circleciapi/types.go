@@ -36,57 +36,6 @@ type ClaimResponse struct {
 	TTLUpdatedAt      *time.Time    `json:"ttl_updated_at,omitzero"`
 }
 
-// Decision represents the schema.
-type Decision struct {
-	EnabledRules *[]string    `json:"enabled_rules,omitzero"`
-	HardFailures *[]Violation `json:"hard_failures,omitzero"`
-	Reason       *string      `json:"reason,omitzero"`
-	SoftFailures *[]Violation `json:"soft_failures,omitzero"`
-	Status       string       `json:"status"`
-}
-
-// DecisionLog represents the schema.
-type DecisionLog struct {
-	CreatedAt   *time.Time           `json:"created_at,omitzero"`
-	Decision    *Decision            `json:"decision,omitzero"`
-	ID          *string              `json:"id,omitzero"`
-	Metadata    *DecisionLogMetadata `json:"metadata,omitzero"`
-	Policies    *map[string]string   `json:"policies,omitzero"`
-	TimeTakenMs *int64               `json:"time_taken_ms,omitzero"`
-}
-
-// DecisionSettings represents the schema.
-type DecisionSettings struct {
-	Enabled *bool `json:"enabled,omitzero"`
-}
-
-// JSONDuration is a type alias.
-type JSONDuration = string
-
-// PatchClaimsRequest represents the schema.
-type PatchClaimsRequest struct {
-	Audience *[]string     `json:"audience,omitzero"`
-	TTL      *JSONDuration `json:"ttl,omitzero"`
-}
-
-// Policy represents the schema.
-type Policy struct {
-	Content   *string    `json:"content,omitzero"`
-	CreatedAt *time.Time `json:"created_at,omitzero"`
-	CreatedBy *string    `json:"created_by,omitzero"`
-	Name      *string    `json:"name,omitzero"`
-}
-
-// PolicyBundle represents the schema.
-type PolicyBundle struct {
-}
-
-// Violation represents the schema.
-type Violation struct {
-	Reason string `json:"reason"`
-	Rule   string `json:"rule"`
-}
-
 // Component represents the schema.
 type Component struct {
 	ID           *string    `json:"id,omitzero"`
@@ -141,6 +90,30 @@ type CreateTriggerRequest struct {
 	Disabled    *bool                           `json:"disabled,omitzero"`
 }
 
+// Decision represents the schema.
+type Decision struct {
+	EnabledRules *[]string    `json:"enabled_rules,omitzero"`
+	HardFailures *[]Violation `json:"hard_failures,omitzero"`
+	Reason       *string      `json:"reason,omitzero"`
+	SoftFailures *[]Violation `json:"soft_failures,omitzero"`
+	Status       string       `json:"status"`
+}
+
+// DecisionLog represents the schema.
+type DecisionLog struct {
+	CreatedAt   *time.Time           `json:"created_at,omitzero"`
+	Decision    *Decision            `json:"decision,omitzero"`
+	ID          *string              `json:"id,omitzero"`
+	Metadata    *DecisionLogMetadata `json:"metadata,omitzero"`
+	Policies    *map[string]string   `json:"policies,omitzero"`
+	TimeTakenMs *int64               `json:"time_taken_ms,omitzero"`
+}
+
+// DecisionSettings represents the schema.
+type DecisionSettings struct {
+	Enabled *bool `json:"enabled,omitzero"`
+}
+
 // DeleteContextResponse represents the schema.
 type DeleteContextResponse struct {
 	Message string `json:"message"`
@@ -189,6 +162,9 @@ type Groups struct {
 	TotalCount    *int64                     `json:"total_count,omitzero"`
 }
 
+// JSONDuration is a type alias.
+type JSONDuration = string
+
 // Label represents the schema.
 type Label struct {
 	Key   *string `json:"key,omitzero"`
@@ -211,6 +187,12 @@ type PaginatedComponentVersionList struct {
 type PaginatedEnvironmentList struct {
 	Items         *[]Environment             `json:"items,omitzero"`
 	NextPageToken openapigo.Nullable[string] `json:"next_page_token,omitzero"`
+}
+
+// PatchClaimsRequest represents the schema.
+type PatchClaimsRequest struct {
+	Audience *[]string     `json:"audience,omitzero"`
+	TTL      *JSONDuration `json:"ttl,omitzero"`
 }
 
 // PipelineDefinition represents the schema.
@@ -250,6 +232,18 @@ type PipelineTriggeredResponse struct {
 	CreatedAt *time.Time `json:"created_at,omitzero"`
 	Number    *int64     `json:"number,omitzero"`
 	ID        *string    `json:"id,omitzero"`
+}
+
+// Policy represents the schema.
+type Policy struct {
+	Content   *string    `json:"content,omitzero"`
+	CreatedAt *time.Time `json:"created_at,omitzero"`
+	CreatedBy *string    `json:"created_by,omitzero"`
+	Name      *string    `json:"name,omitzero"`
+}
+
+// PolicyBundle represents the schema.
+type PolicyBundle struct {
 }
 
 // ProjectSettings represents the schema.
@@ -305,6 +299,9 @@ type TriggerDeleted struct {
 	Message *string `json:"message,omitzero"`
 }
 
+// TriggerEventPreset represents the enum values.
+type TriggerEventPreset string
+
 // TriggerList represents the schema.
 type TriggerList struct {
 	Items *[]Trigger `json:"items,omitzero"`
@@ -318,8 +315,11 @@ type TriggerPipelineRequest struct {
 	Parameters   *map[string]any                 `json:"parameters,omitzero"`
 }
 
-// TriggerEventPreset represents the enum values.
-type TriggerEventPreset string
+// Violation represents the schema.
+type Violation struct {
+	Reason string `json:"reason"`
+	Rule   string `json:"rule"`
+}
 
 const (
 	TriggerEventPresetAllPushes                    TriggerEventPreset = "all-pushes"
@@ -529,16 +529,6 @@ type CancelJobByJobIDResponse struct {
 	Message string `json:"message"`
 }
 
-// CancelJobByJobID400Error represents the schema.
-type CancelJobByJobID400Error struct {
-	Message string `json:"message"`
-}
-
-// CancelJobByJobID401Error represents the schema.
-type CancelJobByJobID401Error struct {
-	Message string `json:"message"`
-}
-
 // CancelJobByJobID403Error represents the schema.
 type CancelJobByJobID403Error struct {
 	Message string `json:"message"`
@@ -552,6 +542,16 @@ type CancelJobByJobID404Error struct {
 // CancelJobByJobIDDefaultError represents the schema.
 type CancelJobByJobIDDefaultError struct {
 	Message *string `json:"message,omitzero"`
+}
+
+// CancelJobByJobID400Error represents the schema.
+type CancelJobByJobID400Error struct {
+	Message string `json:"message"`
+}
+
+// CancelJobByJobID401Error represents the schema.
+type CancelJobByJobID401Error struct {
+	Message string `json:"message"`
 }
 
 // GetCurrentUserResponse represents the schema.
@@ -775,6 +775,16 @@ type GetProjectBySlugDefaultError struct {
 	Message *string `json:"message,omitzero"`
 }
 
+// CreateProject1500Error represents the schema.
+type CreateProject1500Error struct {
+	Message *string `json:"message,omitzero"`
+}
+
+// CreateProject1400Error represents the schema.
+type CreateProject1400Error struct {
+	Message *string `json:"message,omitzero"`
+}
+
 // CreateProject1401Error represents the schema.
 type CreateProject1401Error struct {
 	Message *string `json:"message,omitzero"`
@@ -797,16 +807,6 @@ type CreateProject1405Error struct {
 
 // CreateProject1429Error represents the schema.
 type CreateProject1429Error struct {
-	Message *string `json:"message,omitzero"`
-}
-
-// CreateProject1500Error represents the schema.
-type CreateProject1500Error struct {
-	Message *string `json:"message,omitzero"`
-}
-
-// CreateProject1400Error represents the schema.
-type CreateProject1400Error struct {
 	Message *string `json:"message,omitzero"`
 }
 
@@ -1317,11 +1317,6 @@ type RerunWorkflowDefaultError struct {
 	Message *string `json:"message,omitzero"`
 }
 
-// GetOrgClaims400Error represents the schema.
-type GetOrgClaims400Error struct {
-	Error string `json:"error"`
-}
-
 // GetOrgClaims403Error represents the schema.
 type GetOrgClaims403Error struct {
 	Error string `json:"error"`
@@ -1329,6 +1324,11 @@ type GetOrgClaims403Error struct {
 
 // GetOrgClaims500Error represents the schema.
 type GetOrgClaims500Error struct {
+	Error string `json:"error"`
+}
+
+// GetOrgClaims400Error represents the schema.
+type GetOrgClaims400Error struct {
 	Error string `json:"error"`
 }
 
@@ -1348,11 +1348,6 @@ type MakeDecisionBody struct {
 	Metadata *map[string]any `json:"metadata,omitzero"`
 }
 
-// MakeDecision400Error represents the schema.
-type MakeDecision400Error struct {
-	Error string `json:"error"`
-}
-
 // MakeDecision401Error represents the schema.
 type MakeDecision401Error struct {
 	Error string `json:"error"`
@@ -1360,6 +1355,11 @@ type MakeDecision401Error struct {
 
 // MakeDecision500Error represents the schema.
 type MakeDecision500Error struct {
+	Error string `json:"error"`
+}
+
+// MakeDecision400Error represents the schema.
+type MakeDecision400Error struct {
 	Error string `json:"error"`
 }
 
