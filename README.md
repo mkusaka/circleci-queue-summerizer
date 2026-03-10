@@ -106,3 +106,22 @@ sqlite3 data.db "SELECT name, AVG(queue_time_ms) FROM jobs GROUP BY name"
 - Project slug should be in `gh/org/repo` format (for GitHub repositories)
 - Multiple projects are processed concurrently
 - Queue time is measured in milliseconds (`queue_time_ms` in SQLite, `queue_time` in NDJSON/table)
+
+## Client Generation
+
+The CircleCI API client in [`internal/circleciapi`](./internal/circleciapi) is generated from `swagger.json` with [`openapigo`](https://github.com/mkusaka/openapigo).
+
+To refresh the checked-in spec from CircleCI and regenerate the client:
+
+```bash
+./scripts/update-circleci-openapi.sh
+```
+
+`go generate ./...` regenerates the client from the committed `swagger.json`. The update script also applies a local patch for the `/workflow/{id}/job` `page-token` query parameter, which is required by this CLI but missing from CircleCI's published OpenAPI document.
+
+It also rewrites CircleCI's slash-delimited `project-slug` / `org-slug` path parameters into explicit path segments before code generation:
+
+- `project-slug` -> `{provider}/{organization}/{project}`
+- `org-slug` -> `{provider}/{organization}`
+
+This keeps the generated client aligned with CircleCI's actual URL shape without relying on runtime path rewriting. CI re-runs `go generate ./...` and fails if the checked-in generated files drift.

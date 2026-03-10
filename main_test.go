@@ -870,6 +870,54 @@ func TestCLI_InvalidSince(t *testing.T) {
 
 // --- Mock API server for integration tests ---
 
+func testAPITimestamp(offset time.Duration) string {
+	base := time.Now().UTC().Add(-1 * time.Hour)
+	return base.Add(offset).Format(time.RFC3339)
+}
+
+func newAPIPipelineItem(id string) PipelineItem {
+	item := PipelineItem{
+		ID:          id,
+		ProjectSlug: "gh/org/repo",
+		Number:      1,
+		State:       "created",
+		CreatedAt:   testAPITimestamp(0),
+		UpdatedAt:   testAPITimestamp(1 * time.Minute),
+	}
+	item.Trigger.Type = "webhook"
+	item.Trigger.ReceivedAt = testAPITimestamp(-1 * time.Second)
+	item.Trigger.Actor.Login = "user1"
+	item.Trigger.Actor.AvatarURL = "https://example.com/avatar.png"
+	return item
+}
+
+func newAPIWorkflowItem(id, pipelineID, name, status string) WorkflowItem {
+	return WorkflowItem{
+		ID:             id,
+		PipelineID:     pipelineID,
+		Name:           name,
+		Status:         status,
+		CreatedAt:      testAPITimestamp(0),
+		StoppedAt:      testAPITimestamp(5 * time.Minute),
+		PipelineNumber: 1,
+		ProjectSlug:    "gh/org/repo",
+		StartedBy:      "user-1",
+	}
+}
+
+func newAPIWorkflowJobItem(id, name, jobType, status string, jobNumber int) WorkflowJobItem {
+	return WorkflowJobItem{
+		ID:          id,
+		Name:        name,
+		Type:        jobType,
+		Status:      status,
+		JobNumber:   jobNumber,
+		StartedAt:   testAPITimestamp(5 * time.Second),
+		StoppedAt:   testAPITimestamp(1 * time.Minute),
+		ProjectSlug: "gh/org/repo",
+	}
+}
+
 // newMockCircleCIServer creates a mock server that responds to the
 // CircleCI API endpoints used by processProject.
 func newMockCircleCIServer(t *testing.T) *httptest.Server {
@@ -879,16 +927,7 @@ func newMockCircleCIServer(t *testing.T) *httptest.Server {
 		switch {
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{
-					{
-						ID:          "pipe-1",
-						ProjectSlug: "gh/org/repo",
-						Number:      1,
-						State:       "created",
-						CreatedAt:   time.Now().Format(time.RFC3339),
-						UpdatedAt:   time.Now().Format(time.RFC3339),
-					},
-				},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/job/"):
 			jr := JobResponse{
@@ -923,28 +962,11 @@ func newMockCircleCIServer(t *testing.T) *httptest.Server {
 			})
 		case strings.HasPrefix(path, "/api/v2/pipeline/pipe-1/workflow"):
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{
-					{
-						ID:         "wf-1",
-						PipelineID: "pipe-1",
-						Name:       "build",
-						Status:     "success",
-						CreatedAt:  time.Now().Format(time.RFC3339),
-					},
-				},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", "success")},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/wf-1/job"):
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{
-					{
-						ID:          "job-1",
-						Name:        "test-job",
-						Type:        "build",
-						Status:      "success",
-						JobNumber:   1,
-						ProjectSlug: "gh/org/repo",
-					},
-				},
+				Items: []WorkflowJobItem{newAPIWorkflowJobItem("job-1", "test-job", "build", "success", 1)},
 			})
 		default:
 			t.Logf("unhandled path: %s", path)
@@ -1197,6 +1219,43 @@ func TestCircleCIClient_BaseURL(t *testing.T) {
 	}
 }
 
+func TestCircleCIClient_GetWorkflowJobs_PageToken(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v2/workflow/wf-1/job" {
+			t.Fatalf("path = %q, want %q", r.URL.Path, "/api/v2/workflow/wf-1/job")
+		}
+		if got := r.URL.Query().Get("page-token"); got != "next-page" {
+			t.Fatalf("page-token = %q, want %q", got, "next-page")
+		}
+		if got := r.Header.Get("Circle-Token"); got != "test-token" {
+			t.Fatalf("Circle-Token = %q, want %q", got, "test-token")
+		}
+		job := newAPIWorkflowJobItem("job-1", "test", "build", "success", 1)
+		json.NewEncoder(w).Encode(WorkflowJobsResponse{
+			Items:         []WorkflowJobItem{job},
+			NextPageToken: "after-page",
+		})
+	}))
+	defer server.Close()
+
+	client := &CircleCIClient{
+		Token:   "test-token",
+		Client:  server.Client(),
+		BaseURL: server.URL,
+	}
+
+	resp, err := client.GetWorkflowJobs(context.Background(), "wf-1", "next-page")
+	if err != nil {
+		t.Fatalf("GetWorkflowJobs: %v", err)
+	}
+	if resp.NextPageToken != "after-page" {
+		t.Fatalf("NextPageToken = %q, want %q", resp.NextPageToken, "after-page")
+	}
+	if len(resp.Items) != 1 || resp.Items[0].ID != "job-1" {
+		t.Fatalf("Items = %+v", resp.Items)
+	}
+}
+
 // --- Mock server for approval job ---
 
 func newMockCircleCIServerWithApproval(t *testing.T) *httptest.Server {
@@ -1206,15 +1265,7 @@ func newMockCircleCIServerWithApproval(t *testing.T) *httptest.Server {
 		switch {
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{
-					{
-						ID:          "pipe-1",
-						ProjectSlug: "gh/org/repo",
-						Number:      1,
-						State:       "created",
-						CreatedAt:   time.Now().Format(time.RFC3339),
-					},
-				},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.HasPrefix(path, "/api/v2/project/gh/org/repo/job/"):
 			json.NewEncoder(w).Encode(JobResponse{
@@ -1235,35 +1286,14 @@ func newMockCircleCIServerWithApproval(t *testing.T) *httptest.Server {
 			})
 		case strings.HasPrefix(path, "/api/v2/pipeline/pipe-1/workflow"):
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{
-					{
-						ID:         "wf-1",
-						PipelineID: "pipe-1",
-						Name:       "deploy",
-						Status:     "success",
-						CreatedAt:  time.Now().Format(time.RFC3339),
-					},
-				},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "deploy", "success")},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/wf-1/job"):
+			buildJob := newAPIWorkflowJobItem("build-job-1", "build-job", "build", "success", 1)
+			approvalJob := newAPIWorkflowJobItem("approval-1", "hold-for-deploy", "approval", "success", 0)
+			approvalJob.ApprovedBy = "user-1"
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{
-					{
-						ID:        "build-job-1",
-						Name:      "build-job",
-						Type:      "build",
-						Status:    "success",
-						JobNumber: 1,
-					},
-					{
-						ID:         "approval-1",
-						Name:       "hold-for-deploy",
-						Type:       "approval",
-						Status:     "success",
-						JobNumber:  0,
-						ApprovedBy: "user-1",
-					},
-				},
+				Items: []WorkflowJobItem{buildJob, approvalJob},
 			})
 		default:
 			w.WriteHeader(http.StatusNotFound)
@@ -1576,13 +1606,7 @@ func TestProcessProject_SQLite_SkipsRedundantAPICalls(t *testing.T) {
 		switch {
 		case strings.HasSuffix(path, "/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{{
-					ID:          "pipe-1",
-					ProjectSlug: "gh/org/repo",
-					Number:      1,
-					State:       "created",
-					CreatedAt:   time.Now().Format(time.RFC3339),
-				}},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.Contains(path, "/job/"):
 			jr := JobResponse{
@@ -1605,24 +1629,12 @@ func TestProcessProject_SQLite_SkipsRedundantAPICalls(t *testing.T) {
 			json.NewEncoder(w).Encode(jr)
 		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{{
-					ID:         "wf-1",
-					PipelineID: "pipe-1",
-					Name:       "build",
-					Status:     "success",
-					CreatedAt:  time.Now().Format(time.RFC3339),
-				}},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", "success")},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			job := newAPIWorkflowJobItem("job-1", "test-job", "build", "success", 1)
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{{
-					ID:          "job-1",
-					Name:        "test-job",
-					Type:        "build",
-					Status:      "success",
-					JobNumber:   1,
-					ProjectSlug: "gh/org/repo",
-				}},
+				Items: []WorkflowJobItem{job},
 			})
 		case strings.HasPrefix(path, "/api/v2/project/"):
 			json.NewEncoder(w).Encode(ProjectResponse{
@@ -1743,44 +1755,17 @@ func TestProcessProject_SQLite_SkipsNotRunJobDetails(t *testing.T) {
 		switch {
 		case strings.HasSuffix(path, "/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{{
-					ID:          "pipe-1",
-					ProjectSlug: "gh/org/repo",
-					Number:      1,
-					State:       "created",
-					CreatedAt:   time.Now().Format(time.RFC3339),
-				}},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{{
-					ID:         "wf-1",
-					PipelineID: "pipe-1",
-					Name:       "build",
-					Status:     "success",
-					CreatedAt:  time.Now().Format(time.RFC3339),
-				}},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", "success")},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			job1 := newAPIWorkflowJobItem("job-1", "test-job", "build", "success", 1)
+			job2 := newAPIWorkflowJobItem("job-2", "skipped-job", "build", "not_run", 2)
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{
-					{
-						ID:          "job-1",
-						Name:        "test-job",
-						Type:        "build",
-						Status:      "success",
-						JobNumber:   1,
-						ProjectSlug: "gh/org/repo",
-					},
-					{
-						ID:          "job-2",
-						Name:        "skipped-job",
-						Type:        "build",
-						Status:      "not_run",
-						JobNumber:   2,
-						ProjectSlug: "gh/org/repo",
-					},
-				},
+				Items: []WorkflowJobItem{job1, job2},
 			})
 		case strings.HasSuffix(path, "/job/1"):
 			jr := JobResponse{
@@ -1879,36 +1864,17 @@ func TestProcessProject_SQLite_Stores404JobWithoutWarning(t *testing.T) {
 		switch {
 		case strings.HasSuffix(path, "/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{{
-					ID:          "pipe-1",
-					ProjectSlug: "gh/org/repo",
-					Number:      1,
-					State:       "created",
-					CreatedAt:   time.Now().Format(time.RFC3339),
-				}},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{{
-					ID:         "wf-1",
-					PipelineID: "pipe-1",
-					Name:       "build",
-					Status:     "canceled",
-					CreatedAt:  time.Now().Format(time.RFC3339),
-				}},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", "canceled")},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			job := newAPIWorkflowJobItem("job-404", "canceled-job", "build", "canceled", 2)
+			job.StoppedAt = "2026-01-15T10:00:10Z"
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{{
-					ID:          "job-404",
-					Name:        "canceled-job",
-					Type:        "build",
-					Status:      "canceled",
-					JobNumber:   2,
-					StartedAt:   "2026-01-15T10:00:05Z",
-					StoppedAt:   "2026-01-15T10:00:10Z",
-					ProjectSlug: "gh/org/repo",
-				}},
+				Items: []WorkflowJobItem{job},
 			})
 		case strings.HasSuffix(path, "/job/2"):
 			mu.Lock()
@@ -2024,28 +1990,29 @@ func TestProcessProject_SQLite_SkipsJobsLikelyWithoutDetails(t *testing.T) {
 				switch {
 				case strings.HasSuffix(path, "/pipeline"):
 					json.NewEncoder(w).Encode(PipelineResponse{
-						Items: []PipelineItem{{
-							ID:          "pipe-1",
-							ProjectSlug: "gh/org/repo",
-							Number:      1,
-							State:       "created",
-							CreatedAt:   time.Now().Format(time.RFC3339),
-						}},
+						Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 					})
 				case strings.HasPrefix(path, "/api/v2/pipeline/") && strings.Contains(path, "/workflow"):
 					json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-						Items: []WorkflowItem{{
-							ID:         "wf-1",
-							PipelineID: "pipe-1",
-							Name:       "build",
-							Status:     "canceled",
-							CreatedAt:  time.Now().Format(time.RFC3339),
-						}},
+						Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", "canceled")},
 					})
 				case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
-					json.NewEncoder(w).Encode(WorkflowJobsResponse{
-						Items: []WorkflowJobItem{tc.job},
-					})
+					if tc.name == "canceled_without_started_at" {
+						json.NewEncoder(w).Encode(map[string]any{
+							"items": []map[string]any{{
+								"id":           tc.job.ID,
+								"name":         tc.job.Name,
+								"type":         tc.job.Type,
+								"status":       tc.job.Status,
+								"job_number":   tc.job.JobNumber,
+								"project_slug": tc.job.ProjectSlug,
+							}},
+						})
+					} else {
+						json.NewEncoder(w).Encode(WorkflowJobsResponse{
+							Items: []WorkflowJobItem{tc.job},
+						})
+					}
 				case strings.HasSuffix(path, fmt.Sprintf("/job/%d", tc.job.JobNumber)):
 					mu.Lock()
 					jobDetailCalls++
@@ -2140,12 +2107,7 @@ func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 		switch {
 		case strings.HasSuffix(path, "/pipeline"):
 			json.NewEncoder(w).Encode(PipelineResponse{
-				Items: []PipelineItem{{
-					ID:        "pipe-1",
-					Number:    1,
-					State:     "created",
-					CreatedAt: time.Now().Format(time.RFC3339),
-				}},
+				Items: []PipelineItem{newAPIPipelineItem("pipe-1")},
 			})
 		case strings.Contains(path, "/job/"):
 			json.NewEncoder(w).Encode(JobResponse{
@@ -2165,24 +2127,12 @@ func TestProcessProject_SQLite_PartialSkip_NonTerminalWorkflow(t *testing.T) {
 				status = "success"
 			}
 			json.NewEncoder(w).Encode(PipelineWorkflowResponse{
-				Items: []WorkflowItem{{
-					ID:         "wf-1",
-					PipelineID: "pipe-1",
-					Name:       "build",
-					Status:     status,
-					CreatedAt:  time.Now().Format(time.RFC3339),
-				}},
+				Items: []WorkflowItem{newAPIWorkflowItem("wf-1", "pipe-1", "build", status)},
 			})
 		case strings.HasPrefix(path, "/api/v2/workflow/") && strings.Contains(path, "/job"):
+			job := newAPIWorkflowJobItem("job-1", "test-job", "build", "success", 1)
 			json.NewEncoder(w).Encode(WorkflowJobsResponse{
-				Items: []WorkflowJobItem{{
-					ID:          "job-1",
-					Name:        "test-job",
-					Type:        "build",
-					Status:      "success",
-					JobNumber:   1,
-					ProjectSlug: "gh/org/repo",
-				}},
+				Items: []WorkflowJobItem{job},
 			})
 		case strings.HasPrefix(path, "/api/v2/project/"):
 			json.NewEncoder(w).Encode(ProjectResponse{ID: "proj-1", Slug: "gh/org/repo", Name: "repo"})
