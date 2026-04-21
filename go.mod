@@ -4,6 +4,7 @@ go 1.26.0
 
 require (
 	github.com/briandowns/spinner v1.23.2
+	github.com/hashicorp/go-retryablehttp v0.7.8
 	github.com/mattn/go-isatty v0.0.20
 	github.com/mkusaka/openapigo v0.0.0-20260309134111-9b35d9b2aa8f
 	github.com/urfave/cli/v2 v2.27.5
@@ -13,9 +14,10 @@ require (
 require (
 	github.com/cpuguy83/go-md2man/v2 v2.0.5 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/fatih/color v1.7.0 // indirect
+	github.com/fatih/color v1.16.0 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/mattn/go-colorable v0.1.2 // indirect
+	github.com/hashicorp/go-cleanhttp v0.5.2 // indirect
+	github.com/mattn/go-colorable v0.1.13 // indirect
 	github.com/ncruces/go-strftime v1.0.0 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/russross/blackfriday/v2 v2.1.0 // indirect

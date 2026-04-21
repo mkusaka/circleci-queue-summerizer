@@ -11,7 +11,7 @@ A CLI tool to analyze queue times of CircleCI jobs.
 - Time-based filtering with `--since` flag
 - Output in table, NDJSON, or SQLite format
 - SQLite output with upsert support (`INSERT OR REPLACE`) for incremental data collection
-- Automatic retry with exponential backoff for API rate limits (429) and server errors (5xx)
+- Automatic retry with exponential backoff for transient connection errors, API rate limits (429), and server errors (5xx)
 - Detailed information including workflow IDs, pipeline IDs, and job statuses
 
 ## Installation

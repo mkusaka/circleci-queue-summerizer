@@ -232,14 +232,11 @@ func (c *CircleCIClient) baseURL() string {
 const (
 	maxRetries     = 5
 	initialBackoff = 1 * time.Second
+	maxBackoff     = 32 * time.Second
 )
 
 func (c *CircleCIClient) doWithRetry(req *http.Request) (*http.Response, error) {
-	client := c.Client
-	if client == nil {
-		client = http.DefaultClient
-	}
-	return doRequestWithRetry(req, client.Do, c.Warnf)
+	return c.retryingHTTPClient().Do(req)
 }
 
 func (c *CircleCIClient) GetWorkflows(ctx context.Context, projectSlug string) (*WorkflowResponse, error) {

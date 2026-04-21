@@ -4,99 +4,42 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"math/rand"
 	"net/http"
-	"os"
-	"strconv"
 	"strings"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	circleciapi "github.com/mkusaka/circleci-queue-summerizer/internal/circleciapi"
 	"github.com/mkusaka/openapigo"
 )
 
-type requestDoer func(*http.Request) (*http.Response, error)
+type discardRetryLogger struct{}
 
-type retryingRoundTripper struct {
-	base  http.RoundTripper
-	warnf func(format string, args ...any)
+func (discardRetryLogger) Printf(string, ...interface{}) {}
+
+func (c *CircleCIClient) retryCheck(ctx context.Context, resp *http.Response, err error) (bool, error) {
+	if err != nil && (errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)) {
+		return false, err
+	}
+
+	retry, checkErr := retryablehttp.ErrorPropagatedRetryPolicy(ctx, resp, err)
+	if retry && c.Warnf != nil {
+		c.Warnf("%s; retrying\n", retryMessage(resp, err))
+	}
+	return retry, checkErr
 }
 
-func (rt retryingRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
-	return doRequestWithRetry(req, rt.base.RoundTrip, rt.warnf)
-}
-
-func doRequestWithRetry(req *http.Request, do requestDoer, warnf func(format string, args ...any)) (*http.Response, error) {
-	for attempt := 0; attempt <= maxRetries; attempt++ {
-		attemptReq, err := cloneRequestForRetry(req, attempt)
-		if err != nil {
-			return nil, err
-		}
-
-		resp, err := do(attemptReq)
-		if err != nil {
-			return nil, err
-		}
-
-		if resp.StatusCode != http.StatusTooManyRequests && resp.StatusCode < 500 {
-			return resp, nil
-		}
-
-		if attempt == maxRetries || (req.Body != nil && req.GetBody == nil) {
-			return resp, nil
-		}
-
-		var wait time.Duration
-		if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
-			if seconds, parseErr := strconv.Atoi(retryAfter); parseErr == nil {
-				wait = time.Duration(seconds) * time.Second
-			}
-		}
-		if wait == 0 {
-			wait = initialBackoff * time.Duration(1<<uint(attempt))
-		}
-		jitter := time.Duration(float64(wait) * rand.Float64() * 0.5)
-		wait += jitter
-
-		_ = resp.Body.Close()
-
-		if warnf != nil {
-			warnf("Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
-		} else {
-			fmt.Fprintf(os.Stderr, "Rate limited (attempt %d/%d), waiting %v...\n", attempt+1, maxRetries, wait.Round(time.Millisecond))
-		}
-
-		select {
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		case <-time.After(wait):
-		}
-	}
-
-	return nil, fmt.Errorf("exceeded maximum retries")
-}
-
-func cloneRequestForRetry(req *http.Request, attempt int) (*http.Request, error) {
-	cloned := req.Clone(req.Context())
-	if req.Body == nil {
-		return cloned, nil
-	}
-
-	if attempt == 0 {
-		cloned.Body = req.Body
-		return cloned, nil
-	}
-
-	if req.GetBody == nil {
-		return nil, fmt.Errorf("cannot retry request with non-replayable body")
-	}
-
-	body, err := req.GetBody()
+func retryMessage(resp *http.Response, err error) string {
 	if err != nil {
-		return nil, err
+		return fmt.Sprintf("Request failed: %v", err)
 	}
-	cloned.Body = body
-	return cloned, nil
+	if resp != nil && resp.StatusCode == http.StatusTooManyRequests {
+		return "Rate limited"
+	}
+	if resp != nil {
+		return fmt.Sprintf("Server error (%d)", resp.StatusCode)
+	}
+	return "Request failed"
 }
 
 func (c *CircleCIClient) generatedClient() *openapigo.Client {
@@ -117,15 +60,23 @@ func (c *CircleCIClient) retryingHTTPClient() *http.Client {
 		baseClient = http.DefaultClient
 	}
 
+	transportClient := *baseClient
+	if transportClient.Transport == nil {
+		transportClient.Transport = http.DefaultTransport
+	}
+
+	retryClient := retryablehttp.NewClient()
+	retryClient.RetryMax = maxRetries
+	retryClient.RetryWaitMin = initialBackoff
+	retryClient.RetryWaitMax = maxBackoff
+	retryClient.Backoff = retryablehttp.DefaultBackoff
+	retryClient.CheckRetry = c.retryCheck
+	retryClient.ErrorHandler = retryablehttp.PassthroughErrorHandler
+	retryClient.HTTPClient = &transportClient
+	retryClient.Logger = discardRetryLogger{}
+
 	cloned := *baseClient
-	transport := cloned.Transport
-	if transport == nil {
-		transport = http.DefaultTransport
-	}
-	cloned.Transport = retryingRoundTripper{
-		base:  transport,
-		warnf: c.Warnf,
-	}
+	cloned.Transport = &retryablehttp.RoundTripper{Client: retryClient}
 	return &cloned
 }
 

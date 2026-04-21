@@ -6,15 +6,23 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 )
+
+type roundTripperFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripperFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // --- Helper: nilIfEmpty / nilIfZero ---
 
@@ -428,6 +436,66 @@ func TestDoWithRetry_4xxNoRetry(t *testing.T) {
 	}
 	if callCount != 1 {
 		t.Errorf("callCount = %d, want 1 (4xx should not retry)", callCount)
+	}
+}
+
+func TestDoWithRetry_TransportErrorThenSuccess(t *testing.T) {
+	callCount := 0
+	client := &CircleCIClient{
+		Token: "test-token",
+		Client: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			callCount++
+			if callCount == 1 {
+				return nil, fmt.Errorf("read: %w", syscall.ECONNRESET)
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Body:       io.NopCloser(strings.NewReader(`{"ok":true}`)),
+				Header:     make(http.Header),
+			}, nil
+		})},
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://circleci.example/api/v2/project/gh/org/repo", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	resp, err := client.doWithRetry(req)
+	if err != nil {
+		t.Fatalf("doWithRetry: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want 200", resp.StatusCode)
+	}
+	if callCount != 2 {
+		t.Fatalf("callCount = %d, want 2", callCount)
+	}
+}
+
+func TestDoWithRetry_NonRetryableError(t *testing.T) {
+	callCount := 0
+	client := &CircleCIClient{
+		Token: "test-token",
+		Client: &http.Client{Transport: roundTripperFunc(func(r *http.Request) (*http.Response, error) {
+			callCount++
+			return nil, fmt.Errorf("wrapped cancel: %w", context.Canceled)
+		})},
+	}
+
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, "https://circleci.example/api/v2/project/gh/org/repo", nil)
+	if err != nil {
+		t.Fatalf("NewRequestWithContext: %v", err)
+	}
+
+	_, err = client.doWithRetry(req)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if callCount != 1 {
+		t.Fatalf("callCount = %d, want 1", callCount)
 	}
 }
 
