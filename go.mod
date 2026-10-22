@@ -2,6 +2,8 @@ module github.com/mkusaka/circleci-queue-summerizer
 
 go 1.26.0
 
+toolchain go1.27.3
+
 require (
 	github.com/briandowns/spinner v1.23.2
 	github.com/hashicorp/go-retryablehttp v0.7.8
