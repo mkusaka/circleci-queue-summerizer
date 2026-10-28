@@ -1,0 +1,30 @@
+{
+  automerge: true,
+  platformAutomerge: false,
+  minimumReleaseAge: "7 days",
+  $schema: "https://docs.renovatebot.com/renovate-schema.json",
+  extends: ["config:best-practices", "customManagers:githubActionsVersions"],
+  packageRules: [
+    {
+      matchManagers: ["gomod"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "go non-major dependencies",
+      automerge: true,
+      automergeType: "pr",
+    },
+    {
+      matchManagers: ["github-actions"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "github-actions non-major updates",
+      automerge: true,
+      automergeType: "pr",
+    },
+    {
+      matchManagers: ["custom.regex"],
+      matchUpdateTypes: ["minor", "patch"],
+      groupName: "workflow tool versions",
+      automerge: true,
+      automergeType: "pr",
+    },
+  ],
+}
